@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vtuber-clips"
+version = "0.1.0"
+description = "Automated VTuber highlight clipping MVP pipeline"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "yt-dlp>=2024.8.0",
+  "chat-downloader>=0.2.0",
+  "faster-whisper>=1.0.0",
+  "librosa>=0.10.0",
+  "soundfile>=0.12.0",
+  "numpy>=1.26.0",
+  "pydantic>=2.0.0",
+  "pysubs2>=1.7.0",
+  "PyYAML>=6.0",
+  "rich>=13.0.0",
+  "tqdm>=4.66.0",
+  "nvidia-cublas-cu12>=12.0.0",
+  "nvidia-cudnn-cu12>=9.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[tool.setuptools.packages.find]
+include = ["common*", "modules*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

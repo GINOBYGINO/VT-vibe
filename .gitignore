@@ -1,0 +1,9 @@
+jobs/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
