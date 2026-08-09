@@ -23,10 +23,15 @@ def refine_bounds(
     end: float,
     intervals: SpeechIntervals,
     *,
-    pad: float = 0.3,
+    pad_lead: float = 0.08,
+    pad_trail: float = 0.15,
+    pad: float | None = None,
     max_sec: float = 120.0,
 ) -> tuple[float, float]:
-    """Snap to nearby speech; keep at most ``pad`` silence at edges."""
+    """Snap to nearby speech; asymmetric pads (tight lead, short trail)."""
+    if pad is not None:
+        pad_lead = pad
+        pad_trail = pad
     if end <= start:
         return start, end
     overlapping = [
@@ -37,8 +42,8 @@ def refine_bounds(
 
     speech_start = min(iv.start for iv in overlapping)
     speech_end = max(iv.end for iv in overlapping)
-    new_start = max(start, speech_start - pad)
-    new_end = min(end, speech_end + pad)
+    new_start = max(start, speech_start - pad_lead)
+    new_end = min(end, speech_end + pad_trail)
     if new_end - new_start > max_sec:
         new_end = new_start + max_sec
     if new_end <= new_start:
@@ -111,6 +116,51 @@ def force_asr_gap_cuts(
     )
 
 
+def trim_leading_trailing_silence(
+    cuts: list[tuple[float, float]],
+    intervals: SpeechIntervals,
+    *,
+    lead_pad: float = 0.08,
+    trail_pad: float = 0.15,
+) -> tuple[list[tuple[float, float]], float, float]:
+    """
+    Force-snip head/tail dead air regardless of silence_min.
+    First keep starts at first voice - lead_pad; last keep ends at last voice + trail_pad.
+    Returns (trimmed_cuts, lead_trimmed_sec, trail_trimmed_sec).
+    """
+    if not cuts:
+        return [], 0.0, 0.0
+
+    window_start = cuts[0][0]
+    window_end = cuts[-1][1]
+    inside = [
+        SpeechInterval(start=max(window_start, iv.start), end=min(window_end, iv.end))
+        for iv in intervals.intervals
+        if iv.end > window_start and iv.start < window_end
+    ]
+    inside = [iv for iv in inside if iv.end - iv.start > 0.05]
+    if not inside:
+        return cuts, 0.0, 0.0
+
+    first_voice = min(iv.start for iv in inside)
+    last_voice = max(iv.end for iv in inside)
+    target_start = max(window_start, first_voice - lead_pad)
+    target_end = min(window_end, last_voice + trail_pad)
+
+    lead_trim = max(0.0, target_start - window_start)
+    trail_trim = max(0.0, window_end - target_end)
+
+    trimmed: list[tuple[float, float]] = []
+    for a, b in cuts:
+        na = max(a, target_start)
+        nb = min(b, target_end)
+        if nb - na > 0.05:
+            trimmed.append((na, nb))
+    if not trimmed:
+        return [(target_start, max(target_start + 0.05, target_end))], lead_trim, trail_trim
+    return trimmed, lead_trim, trail_trim
+
+
 def choose_jump_cuts(
     start: float,
     end: float,
@@ -122,13 +172,15 @@ def choose_jump_cuts(
     """
     Primary jump-cut on voice gaps; if only one cut and ASR/voice coverage
     is below coverage_force, re-cut with a lower silence threshold.
+    Always force-trim leading/trailing silence afterward.
     """
     cuts = jump_cut_segments(start, end, intervals, silence_min=silence_min)
     if not cuts:
-        return [(start, end)]
+        cuts = [(start, end)]
     ratio = speech_ratio(intervals, start, end)
     if len(cuts) == 1 and ratio < coverage_force:
         forced = force_asr_gap_cuts(start, end, intervals, silence_min=0.25)
         if len(forced) > 1:
-            return forced
+            cuts = forced
+    cuts, _, _ = trim_leading_trailing_silence(cuts, intervals)
     return cuts

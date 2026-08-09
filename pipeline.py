@@ -155,7 +155,7 @@ def run_pipeline(
         store.save(state)
 
     job_path = store.paths.root
-    console.print(Panel(f"[bold]Pipeline v0.3[/bold]\njob_dir={job_path}"))
+    console.print(Panel(f"[bold]Pipeline v0.4[/bold]\njob_dir={job_path}"))
 
     for index, step_name in enumerate(STEP_NAMES, start=1):
         if index < from_step:
@@ -178,12 +178,14 @@ def run_pipeline(
             if step_name == "03_highlights" and review_wait:
                 queue = store.paths.review_queue
                 decisions = store.paths.review_decisions
+                prompt = store.paths.cursor_review_prompt
                 console.print(
                     Panel(
-                        "[yellow]--review-wait[/yellow]\n"
-                        f"1) Preview: python -m modules.highlights.preview --job-dir \"{job_path}\"\n"
-                        f"2) Edit: {decisions}\n"
-                        f"3) Re-run from step 3 after saving decisions.\n"
+                        "[yellow]--review-wait（Cursor 代 LLM）[/yellow]\n"
+                        f"1) Open: {prompt}\n"
+                        f"2) Preview: python -m modules.highlights.preview --job-dir \"{job_path}\"\n"
+                        f"3) Write keep/reject (+ optional start/end/title/hook) → {decisions}\n"
+                        f"4) Re-run: python pipeline.py --job-dir \"{job_path}\" --from-step 3\n"
                         f"Queue: {queue}"
                     )
                 )
@@ -222,7 +224,7 @@ def run_pipeline(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="VTuber highlight pipeline v0.3")
+    parser = argparse.ArgumentParser(description="VTuber highlight pipeline v0.4")
     parser.add_argument("--url", default=None, help="YouTube URL")
     parser.add_argument("--job-dir", default=None, help="Existing job directory")
     parser.add_argument(
@@ -238,7 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--review-wait",
         action="store_true",
-        help="Stop after writing review_queue.json for Cursor/manual decisions",
+        help="Stop after writing review_queue + cursor_review_prompt.md for Cursor review",
     )
     parser.add_argument(
         "--content-type",

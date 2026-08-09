@@ -20,7 +20,11 @@ from common.schemas import (
     Transcript,
     TranscriptSegment,
 )
-from modules.edit.speech_trim import choose_jump_cuts, refine_bounds
+from modules.edit.speech_trim import (
+    choose_jump_cuts,
+    refine_bounds,
+    trim_leading_trailing_silence,
+)
 
 OUT_W = 1080
 OUT_H = 1920
@@ -350,10 +354,16 @@ def run(job_dir: str | Path) -> list[Path]:
             highlight.start,
             highlight.end,
             speech,
-            pad=0.3,
+            pad_lead=0.08,
+            pad_trail=0.15,
             max_sec=bound_max,
         )
+        # Never expand ahead of highlight.start into non-speech
+        start = max(start, highlight.start)
         cuts = choose_jump_cuts(start, end, speech, silence_min=0.45)
+        if not cuts:
+            cuts = [(start, end)]
+        cuts, lead_trim, trail_trim = trim_leading_trailing_silence(cuts, speech)
         if not cuts:
             cuts = [(start, end)]
         cut_counts.append(len(cuts))
@@ -361,11 +371,13 @@ def run(job_dir: str | Path) -> list[Path]:
         hook_text = highlight.suggested_hook or highlight.title or "精華"
         video_out = paths.short_nosub(n)
         logger.info(
-            "clip n=%s refined=%.2f-%.2f cuts=%d hook=%s",
+            "clip n=%s refined=%.2f-%.2f cuts=%d lead_trim=%.2f trail_trim=%.2f hook=%s",
             n,
             start,
             end,
             len(cuts),
+            lead_trim,
+            trail_trim,
             hook_text[:20],
         )
         _render_with_cuts(
@@ -387,6 +399,8 @@ def run(job_dir: str | Path) -> list[Path]:
                 "start": start,
                 "end": end,
                 "cuts": [{"start": a, "end": b} for a, b in cuts],
+                "lead_trim": round(lead_trim, 3),
+                "trail_trim": round(trail_trim, 3),
                 "hook_text": hook_text,
             }
         )

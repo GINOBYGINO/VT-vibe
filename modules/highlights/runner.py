@@ -1,4 +1,4 @@
-"""Module 3: peak-oriented highlights + chapters + Cursor review queue."""
+"""Module 3: local prefilter Top-N + Cursor review queue / story-arc fallback."""
 
 from __future__ import annotations
 
@@ -26,12 +26,17 @@ from common.timecode import clamp_duration, seconds_to_timestamp
 from modules.highlights.scoring import (
     WindowScore,
     chapter_title_from_segments,
+    clamp_to_sentence_end,
     hour_bucket_count,
     make_hook,
+    outro_softban_multiplier,
     peak_seed_times,
     score_window,
     select_story_arcs_per_hour,
-    window_around_seed,
+    snap_start_to_speech,
+    suggested_bounds,
+    transcript_excerpt,
+    window_from_speech,
     windows_for_bucket,
 )
 
@@ -85,24 +90,6 @@ def math_ceil(x: float) -> int:
     return int(math.ceil(x))
 
 
-def _ws_to_dict(ws: WindowScore) -> dict[str, Any]:
-    return {
-        "candidate_id": ws.candidate_id,
-        "start": ws.start,
-        "end": ws.end,
-        "score": ws.score,
-        "chat_density": ws.chat_density,
-        "mean_zscore": ws.mean_zscore,
-        "keyword_hits": ws.keyword_hits,
-        "emotion_score": ws.emotion_score,
-        "speech_ratio": ws.speech_ratio,
-        "hour_bucket": ws.hour_bucket,
-        "title": ws.title,
-        "reason": ws.reason,
-        "suggested_hook": make_hook(ws.title),
-    }
-
-
 def _score_one(
     start: float,
     end: float,
@@ -135,6 +122,50 @@ def _score_one(
     )
 
 
+def enrich_candidate(
+    item: dict[str, Any],
+    *,
+    segments,
+    speech: SpeechIntervals,
+    duration: float,
+    content_type: str,
+    outro_keywords: list[str],
+    outro_penalty: float,
+) -> dict[str, Any]:
+    start = float(item["start"])
+    end = float(item["end"])
+    excerpt = transcript_excerpt(segments, start, end)
+    sug_s, sug_e = suggested_bounds(start, end, speech, segments)
+    mult, is_outro = outro_softban_multiplier(
+        text=excerpt + str(item.get("title", "")),
+        start=start,
+        duration=duration,
+        content_type=content_type,
+        keywords=outro_keywords,
+        penalty=outro_penalty,
+    )
+    raw_score = float(item.get("score", 0.0))
+    item = {
+        **item,
+        "raw_score": raw_score,
+        "score": raw_score * mult,
+        "is_outro": is_outro,
+        "outro_multiplier": mult,
+        "transcript_excerpt": excerpt,
+        "suggested_start": round(sug_s, 3),
+        "suggested_end": round(sug_e, 3),
+        "suggested_hook": item.get("suggested_hook") or make_hook(str(item.get("title") or "")),
+        "breakdown": {
+            "chat_density": item.get("chat_density"),
+            "mean_zscore": item.get("mean_zscore"),
+            "keyword_hits": item.get("keyword_hits"),
+            "emotion_score": item.get("emotion_score"),
+            "speech_ratio": item.get("speech_ratio"),
+        },
+    }
+    return item
+
+
 def apply_decisions(
     queue: list[dict[str, Any]],
     decisions: ReviewDecisionsFile,
@@ -147,10 +178,26 @@ def apply_decisions(
         base = by_id.get(d.candidate_id)
         if not base and d.start is None:
             continue
-        start = float(d.start if d.start is not None else base["start"])
-        end = float(d.end if d.end is not None else base["end"])
+        if d.start is not None:
+            start = float(d.start)
+        elif base and base.get("suggested_start") is not None:
+            start = float(base["suggested_start"])
+        else:
+            start = float(base["start"])
+        if d.end is not None:
+            end = float(d.end)
+        elif base and base.get("suggested_end") is not None:
+            end = float(base["suggested_end"])
+        else:
+            end = float(base["end"])
+        if end <= start:
+            continue
         title = d.title or (base or {}).get("title") or "精華片段"
-        hook = d.hook or (base or {}).get("suggested_hook") or make_hook(title)
+        hook = (
+            d.hook
+            or (base or {}).get("suggested_hook")
+            or make_hook(title)
+        )
         highlights.append(
             Highlight(
                 id=len(highlights) + 1,
@@ -169,6 +216,61 @@ def apply_decisions(
             )
         )
     return highlights
+
+
+def write_cursor_review_prompt(
+    path: Path,
+    *,
+    content_type: str,
+    candidates: list[dict[str, Any]],
+    decisions_path: Path,
+) -> None:
+    lines = [
+        "# Cursor 精華審核（代 LLM）",
+        "",
+        f"內容類型：`{content_type}`",
+        "",
+        "## 任務",
+        "1. 閱讀下列候選的字幕摘錄，判斷好不好笑／有沒有梗。",
+        "2. 剔除前後廢話；可覆寫 `start` / `end`（秒）。",
+        "3. 產出 Hook 標題；寫入 `review_decisions.json`。",
+        "4. 完成後執行：`python pipeline.py --job-dir <此 job> --from-step 3`",
+        "",
+        f"決策檔路徑：`{decisions_path}`",
+        "",
+        "```json",
+        "{",
+        '  "decisions": [',
+        '    {"candidate_id": 1, "action": "keep", "start": 12.3, "end": 98.0, "title": "爆笑瞬間", "hook": "當他以為…"},',
+        '    {"candidate_id": 2, "action": "reject"}',
+        "  ]",
+        "}",
+        "```",
+        "",
+        "## 候選摘要（Top N）",
+        "",
+    ]
+    for c in candidates:
+        outro = " **[疑似outro]**" if c.get("is_outro") else ""
+        lines.append(
+            f"### #{c.get('candidate_id')} score={c.get('score', 0):.2f} "
+            f"t={c.get('start', 0):.0f}-{c.get('end', 0):.0f} "
+            f"suggested={c.get('suggested_start', 0):.0f}-{c.get('suggested_end', 0):.0f}"
+            f"{outro}"
+        )
+        lines.append(f"- title: {c.get('title', '')}")
+        lines.append(f"- hook: {c.get('suggested_hook', '')}")
+        lines.append(
+            f"- speech={c.get('speech_ratio', 0):.2f} "
+            f"chat={c.get('chat_density', 0):.3f} "
+            f"vol_z={c.get('mean_zscore', 0):.2f} "
+            f"kw={c.get('keyword_hits', 0)} "
+            f"emo={c.get('emotion_score', 0):.2f}"
+        )
+        excerpt = str(c.get("transcript_excerpt") or "")[:500]
+        lines.append(f"- transcript: {excerpt}")
+        lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def run(job_dir: str | Path, *, weights_path: Path | None = None) -> HighlightsFile:
@@ -203,6 +305,7 @@ def run(job_dir: str | Path, *, weights_path: Path | None = None) -> HighlightsF
     story_min = float(weights.get("story_min_sec", 45.0))
     story_max = float(weights.get("story_max_sec", 120.0))
     story_gap = float(weights.get("story_gap_max_sec", 25.0))
+    prefilter_top_n = int(weights.get("prefilter_top_n", 12))
     step = float(weights.get("window_step_sec", 5.0))
     speech_min = float(weights.get("speech_ratio_min", 0.45))
     w_chat = float(weights.get("w_chat", 1.0))
@@ -210,6 +313,8 @@ def run(job_dir: str | Path, *, weights_path: Path | None = None) -> HighlightsF
     w_kw = float(weights.get("w_kw", 1.5))
     w_emotion = float(weights.get("w_emotion", 0.8))
     keywords = [str(k) for k in (weights.get("keywords") or [])]
+    outro_keywords = [str(k) for k in (weights.get("outro_keywords") or [])]
+    outro_penalty = float(weights.get("outro_penalty", 0.15))
 
     messages = chatlog.messages if chatlog.available else []
     duration = effective_duration(metadata, config)
@@ -225,7 +330,6 @@ def run(job_dir: str | Path, *, weights_path: Path | None = None) -> HighlightsF
     seeds = peak_seed_times(
         peaks_file.peaks, emotion.peaks, messages, duration, vol_z_min=1.5
     )
-    # Ensure each hour has at least one seed
     for b in range(n_buckets):
         b0, b1 = b * 3600.0, min(duration, (b + 1) * 3600.0)
         if not any(b0 <= s < b1 for s in seeds):
@@ -235,7 +339,9 @@ def run(job_dir: str | Path, *, weights_path: Path | None = None) -> HighlightsF
     scored: list[WindowScore] = []
     cid = 1
     for seed in seeds:
-        start, end = window_around_seed(seed, duration, window_len=clip_max)
+        start, end = window_from_speech(
+            seed, duration, speech, window_len=clip_max
+        )
         if end - start < min(clip_min, 20.0) and duration >= clip_min:
             end = min(duration, start + clip_max)
         ws = _score_one(
@@ -270,11 +376,11 @@ def run(job_dir: str | Path, *, weights_path: Path | None = None) -> HighlightsF
         )
         cid += 1
 
-    # Also keep a few sliding windows per bucket as backup
     for bucket in range(n_buckets):
         for start, end in windows_for_bucket(
             bucket, duration, window_len=clip_max, step=max(step, 30.0), min_len=clip_min
         )[:8]:
+            start = snap_start_to_speech(start, end, speech)
             ws = _score_one(
                 start,
                 end,
@@ -307,28 +413,70 @@ def run(job_dir: str | Path, *, weights_path: Path | None = None) -> HighlightsF
             )
             cid += 1
 
-    queue = [_ws_to_dict(ws) for ws in sorted(scored, key=lambda c: -c.score)]
-    # reassign dense candidate ids for review file stability
-    for i, item in enumerate(queue, start=1):
+    raw_queue = [
+        {
+            "candidate_id": ws.candidate_id,
+            "start": ws.start,
+            "end": ws.end,
+            "score": ws.score,
+            "chat_density": ws.chat_density,
+            "mean_zscore": ws.mean_zscore,
+            "keyword_hits": ws.keyword_hits,
+            "emotion_score": ws.emotion_score,
+            "speech_ratio": ws.speech_ratio,
+            "hour_bucket": ws.hour_bucket,
+            "title": ws.title,
+            "reason": ws.reason,
+            "suggested_hook": make_hook(ws.title),
+        }
+        for ws in scored
+    ]
+    enriched = [
+        enrich_candidate(
+            item,
+            segments=transcript.segments,
+            speech=speech,
+            duration=duration,
+            content_type=content_type,
+            outro_keywords=outro_keywords,
+            outro_penalty=outro_penalty,
+        )
+        for item in raw_queue
+    ]
+    enriched.sort(key=lambda c: -float(c["score"]))
+    for i, item in enumerate(enriched, start=1):
         item["candidate_id"] = i
+
+    # Stage-1 review pack: top N for Cursor
+    top_n = enriched[: max(1, prefilter_top_n)]
     write_json(
         paths.review_queue,
         {
             "content_type": content_type,
             "speech_ratio_min": speech_min,
-            "candidates": queue,
+            "prefilter_top_n": prefilter_top_n,
+            "candidates": top_n,
+            "all_candidates_count": len(enriched),
         },
     )
-    write_json(paths.candidates, {"candidates": queue[:200]})
+    write_json(paths.candidates, {"candidates": enriched[:200]})
+    write_cursor_review_prompt(
+        paths.cursor_review_prompt,
+        content_type=content_type,
+        candidates=top_n,
+        decisions_path=paths.review_decisions,
+    )
 
     highlights: list[Highlight] = []
 
     if paths.review_decisions.is_file():
         decisions = read_model(paths.review_decisions, ReviewDecisionsFile)
-        highlights = apply_decisions(queue, decisions)
+        # Decisions may reference top_n ids; also allow full enriched lookup
+        highlights = apply_decisions(enriched, decisions)
     else:
+        # Auto fallback: softban-aware arcs + suggested trim + sentence-end clamp
         arcs = select_story_arcs_per_hour(
-            queue,
+            enriched,
             n_buckets=n_buckets,
             chapter_for_t=chapter_for_t,
             speech_min=speech_min,
@@ -337,9 +485,15 @@ def run(job_dir: str | Path, *, weights_path: Path | None = None) -> HighlightsF
             gap_max=story_gap,
         )
         for i, arc in enumerate(arcs, start=1):
-            start, end = clamp_duration(arc.start, arc.end, story_max)
+            start, end = suggested_bounds(arc.start, arc.end, speech, transcript.segments)
+            start, end = clamp_to_sentence_end(
+                start, end, transcript.segments, story_max=story_max
+            )
             if end - start < min(story_min, clip_min) and duration >= story_min:
                 end = min(duration, start + story_min)
+                start, end = clamp_to_sentence_end(
+                    start, end, transcript.segments, story_max=story_max
+                )
             highlights.append(
                 Highlight(
                     id=i,
@@ -370,6 +524,7 @@ def run(job_dir: str | Path, *, weights_path: Path | None = None) -> HighlightsF
                 "highlights": str(paths.highlights_json),
                 "chapters": str(paths.chapters_json),
                 "review_queue": str(paths.review_queue),
+                "cursor_review_prompt": str(paths.cursor_review_prompt),
             },
         )
     except FileNotFoundError:

@@ -3,8 +3,17 @@ clip_max_sec: 60.0
 story_min_sec: 45.0
 story_max_sec: 120.0
 story_gap_max_sec: 25.0
+prefilter_top_n: 12
 window_step_sec: 5.0
 speech_ratio_min: 0.40
+outro_penalty: 0.35
+outro_keywords:
+  - 晚安
+  - 拜拜
+  - 下班
+  - 下播
+  - 謝謝大家收看
+  - 明天見
 w_chat: 1.0
 w_vol: 1.5
 w_kw: 1.6

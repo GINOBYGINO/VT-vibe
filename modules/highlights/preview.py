@@ -20,38 +20,41 @@ def preview(job_dir: str | Path, *, limit: int = 20) -> None:
     data = json.loads(queue_path.read_text(encoding="utf-8"))
     cands = data.get("candidates") or []
     console = Console()
-    table = Table(title=f"Review queue ({data.get('content_type')})")
+    table = Table(title=f"Review queue ({data.get('content_type')}) top={data.get('prefilter_top_n')}")
     table.add_column("id", justify="right")
     table.add_column("t")
+    table.add_column("sug")
     table.add_column("score", justify="right")
     table.add_column("speech", justify="right")
-    table.add_column("chat", justify="right")
-    table.add_column("vol", justify="right")
-    table.add_column("kw", justify="right")
-    table.add_column("emo", justify="right")
+    table.add_column("outro")
+    table.add_column("excerpt")
     table.add_column("title")
     for c in cands[:limit]:
+        excerpt = str(c.get("transcript_excerpt") or "")[:40]
         table.add_row(
             str(c.get("candidate_id")),
             f"{c.get('start', 0):.0f}-{c.get('end', 0):.0f}",
+            f"{c.get('suggested_start', c.get('start', 0)):.0f}-"
+            f"{c.get('suggested_end', c.get('end', 0)):.0f}",
             f"{c.get('score', 0):.2f}",
             f"{c.get('speech_ratio', 0):.2f}",
-            f"{c.get('chat_density', 0):.3f}",
-            f"{c.get('mean_zscore', 0):.2f}",
-            str(c.get("keyword_hits", 0)),
-            f"{c.get('emotion_score', 0):.2f}",
-            str(c.get("title", ""))[:24],
+            "Y" if c.get("is_outro") else "",
+            excerpt,
+            str(c.get("title", ""))[:20],
         )
     console.print(table)
     console.print(
-        f"speech_ratio_min={data.get('speech_ratio_min')} total={len(cands)} "
+        f"speech_ratio_min={data.get('speech_ratio_min')} "
+        f"queue={len(cands)} all={data.get('all_candidates_count', len(cands))} "
         f"(showing {min(limit, len(cands))})"
     )
+    if paths.cursor_review_prompt.is_file():
+        console.print(f"Cursor prompt: {paths.cursor_review_prompt}")
 
     if paths.highlights_json.is_file():
         hl = json.loads(paths.highlights_json.read_text(encoding="utf-8"))
         items = hl.get("highlights") if isinstance(hl, dict) else hl
-        arc_table = Table(title="Selected story arcs")
+        arc_table = Table(title="Selected story arcs / decisions")
         arc_table.add_column("arc", justify="right")
         arc_table.add_column("t")
         arc_table.add_column("len", justify="right")
@@ -71,9 +74,9 @@ def preview(job_dir: str | Path, *, limit: int = 20) -> None:
         console.print(arc_table)
 
     console.print(
-        "Write decisions to "
-        f"{paths.review_decisions} then re-run: "
-        "python -m modules.highlights --job-dir ..."
+        "1) Open cursor_review_prompt.md\n"
+        f"2) Write decisions to {paths.review_decisions}\n"
+        "3) Re-run: python pipeline.py --job-dir ... --from-step 3"
     )
 
 

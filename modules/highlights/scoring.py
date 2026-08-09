@@ -222,6 +222,169 @@ def window_around_seed(
     return start, end
 
 
+DEFAULT_OUTRO_KEYWORDS = (
+    "晚安",
+    "拜拜",
+    "掰掰",
+    "下班",
+    "下班啦",
+    "今天就到",
+    "下播",
+    "謝謝大家收看",
+    "明天見",
+    "下禮拜見",
+    "結束直播",
+    "今日到此",
+)
+
+
+def is_outro_text(text: str, keywords: Sequence[str] | None = None) -> bool:
+    hay = (text or "").lower()
+    if not hay:
+        return False
+    for kw in keywords or DEFAULT_OUTRO_KEYWORDS:
+        if str(kw).lower() in hay:
+            return True
+    return False
+
+
+def outro_softban_multiplier(
+    *,
+    text: str,
+    start: float,
+    duration: float,
+    content_type: str,
+    keywords: Sequence[str] | None = None,
+    penalty: float = 0.15,
+) -> tuple[float, bool]:
+    """Return (score_multiplier, is_outro). Talk streams punish ending segments harder."""
+    flagged = is_outro_text(text, keywords)
+    in_tail = duration > 0 and start >= duration * 0.92
+    if content_type == "talk" and (flagged or in_tail and flagged):
+        return max(0.05, float(penalty)), True
+    if flagged:
+        return max(0.1, float(penalty) * 1.5), True
+    if content_type == "talk" and in_tail:
+        return 0.55, False
+    return 1.0, False
+
+
+def snap_start_to_speech(
+    start: float,
+    end: float,
+    speech: SpeechIntervals,
+    *,
+    lookback: float = 8.0,
+) -> float:
+    """Pull window start forward to nearby speech onset (reduce dead lead-in)."""
+    if end <= start:
+        return start
+    search_from = max(0.0, start - lookback)
+    onsets = [
+        iv.start
+        for iv in speech.intervals
+        if search_from <= iv.start < end and iv.end > start
+    ]
+    if not onsets:
+        overlapping = [
+            iv.start for iv in speech.intervals if iv.end > start and iv.start < end
+        ]
+        if overlapping:
+            return max(start, min(overlapping) - 0.08)
+        return start
+    # Prefer onset closest to original start within lookback
+    best = min(onsets, key=lambda t: abs(t - start))
+    return max(0.0, best - 0.08)
+
+
+def window_from_speech(
+    seed: float,
+    duration: float,
+    speech: SpeechIntervals,
+    *,
+    window_len: float,
+) -> tuple[float, float]:
+    """Peak-centered window, then snap start to nearby voice onset."""
+    start, end = window_around_seed(seed, duration, window_len=window_len)
+    start = snap_start_to_speech(start, end, speech, lookback=8.0)
+    end = min(duration, start + window_len)
+    if end - start < window_len and start > 0:
+        start = max(0.0, end - window_len)
+        start = snap_start_to_speech(start, end, speech, lookback=4.0)
+    return start, end
+
+
+def suggested_bounds(
+    start: float,
+    end: float,
+    speech: SpeechIntervals,
+    segments: Sequence[TranscriptSegment],
+) -> tuple[float, float]:
+    """Local suggested trim: speech onset → last speech or sentence end within window."""
+    overlapping = [
+        iv for iv in speech.intervals if iv.end > start and iv.start < end
+    ]
+    sug_start = start
+    sug_end = end
+    if overlapping:
+        sug_start = max(start, min(iv.start for iv in overlapping) - 0.08)
+        sug_end = min(end, max(iv.end for iv in overlapping) + 0.15)
+
+    # Prefer ending on sentence-final punctuation near sug_end
+    punct_ends = [
+        float(seg.end)
+        for seg in segments
+        if start < seg.end <= end
+        and (seg.text or "").rstrip().endswith(("。", "！", "？", "!", "?", "～", "~"))
+    ]
+    if punct_ends:
+        # nearest punct end at or before sug_end, else nearest after within window
+        before = [t for t in punct_ends if t <= sug_end + 0.5]
+        if before:
+            sug_end = max(sug_start + 5.0, max(before))
+    if sug_end <= sug_start + 1.0:
+        return start, end
+    return sug_start, sug_end
+
+
+def clamp_to_sentence_end(
+    start: float,
+    end: float,
+    segments: Sequence[TranscriptSegment],
+    *,
+    story_max: float,
+) -> tuple[float, float]:
+    """If span > story_max, cut at nearest sentence end within max rather than hard chop."""
+    if end - start <= story_max:
+        return start, end
+    limit = start + story_max
+    punct_ends = sorted(
+        float(seg.end)
+        for seg in segments
+        if start < seg.end <= limit + 2.0
+        and (seg.text or "").rstrip().endswith(("。", "！", "？", "!", "?", "～", "~"))
+    )
+    if punct_ends:
+        # pick latest punct still within story_max (+small slack)
+        candidates = [t for t in punct_ends if t - start <= story_max + 1e-6]
+        if candidates:
+            return start, max(candidates)
+    return start, start + story_max
+
+
+def transcript_excerpt(
+    segments: Sequence[TranscriptSegment],
+    start: float,
+    end: float,
+    *,
+    max_chars: int = 800,
+) -> str:
+    text = transcript_text_in_window(segments, start, end)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1] + "…"
+
+
 def chapter_title_from_segments(
     segments: Sequence[TranscriptSegment],
     start: float,

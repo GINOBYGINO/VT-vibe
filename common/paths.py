@@ -117,6 +117,10 @@ class JobPaths:
         return self.highlights / "review_decisions.json"
 
     @property
+    def cursor_review_prompt(self) -> Path:
+        return self.highlights / "cursor_review_prompt.md"
+
+    @property
     def feedback_jsonl(self) -> Path:
         return self.highlights / "feedback.jsonl"
 
