@@ -2,25 +2,57 @@
 
 from __future__ import annotations
 
+import os
+import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
 import yt_dlp
 from chat_downloader import ChatDownloader
 
+from common.channel_config import load_channel_config
 from common.io import write_json
 from common.job_store import JobStore
 from common.logging_utils import setup_logger
 from common.paths import JobPaths
-from common.schemas import ChatLog, ChatMessage, Metadata
+from common.schemas import ChatLog, ChatMessage, Metadata, StreamType
 
 STEP_NAME = "01_download"
 
+TALK_KEYWORDS = (
+    "雜談",
+    "閒聊",
+    "聊天",
+    "聊心事",
+    "radio",
+    "雑談",
+    "talk",
+    "棉花糖",
+    "心事",
+)
+GAME_KEYWORDS = (
+    "minecraft",
+    "valorant",
+    "遊戲",
+    "game",
+    "apex",
+    "lol",
+    "原神",
+    "zelda",
+    "魔物獵人",
+    "實況",
+    "節奏天國",
+    "節奏",
+    "復健",
+    "奇蹟之星",
+    "玩",
+)
+
 
 def find_ffmpeg() -> str:
-    """Return ffmpeg executable path from PATH, or raise a clear error."""
     path = shutil.which("ffmpeg")
     if not path:
         raise RuntimeError(
@@ -28,6 +60,18 @@ def find_ffmpeg() -> str:
             "'ffmpeg' executable is available in your PATH."
         )
     return path
+
+
+def infer_stream_type(title: str) -> StreamType:
+    t = (title or "").lower()
+    raw = title or ""
+    for kw in GAME_KEYWORDS:
+        if kw.lower() in t or kw in raw:
+            return "game"
+    for kw in TALK_KEYWORDS:
+        if kw.lower() in t or kw in raw:
+            return "talk"
+    return "unknown"
 
 
 def _resolve_url(job_dir: Path, url: str | None) -> str:
@@ -40,26 +84,44 @@ def _resolve_url(job_dir: Path, url: str | None) -> str:
     return state.url
 
 
-def download_video(url: str, output_mp4: Path) -> dict[str, Any]:
-    """Download best video+audio merged to mp4 via yt-dlp Python API."""
+def _cookies_path() -> str | None:
+    env = os.environ.get("YTDLP_COOKIES", "").strip()
+    if env and Path(env).is_file():
+        return env
+    return None
+
+
+def download_video(
+    url: str,
+    output_mp4: Path,
+    *,
+    video_height: int | None = 720,
+    cookies: str | None = None,
+) -> dict[str, Any]:
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
     outtmpl = str(output_mp4.parent / f"{output_mp4.stem}.%(ext)s")
+    if video_height:
+        fmt = f"bv*[height<=?{video_height}]+ba/b[height<=?{video_height}]/bv*+ba/b"
+    else:
+        fmt = "bv*+ba/b"
     ydl_opts: dict[str, Any] = {
-        "format": "bv*+ba/b",
+        "format": fmt,
         "merge_output_format": "mp4",
         "outtmpl": outtmpl,
         "noprogress": False,
         "quiet": False,
         "no_warnings": False,
-        # Prefer Node when available (yt-dlp EJS / YouTube JS challenge).
         "js_runtimes": {"node": {}},
     }
+    cookie_file = cookies or _cookies_path()
+    if cookie_file:
+        ydl_opts["cookiefile"] = cookie_file
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
     if not isinstance(info, dict):
         raise RuntimeError("yt-dlp returned no metadata")
     if not output_mp4.is_file():
-        # Fallback: locate any mp4 yt-dlp may have written nearby
         candidates = list(output_mp4.parent.glob("raw_video*.mp4"))
         if candidates:
             candidates[0].replace(output_mp4)
@@ -69,7 +131,6 @@ def download_video(url: str, output_mp4: Path) -> dict[str, Any]:
 
 
 def extract_wav(video_path: Path, wav_path: Path, *, ffmpeg: str | None = None) -> None:
-    """Extract mono 16 kHz WAV from video using ffmpeg."""
     ffmpeg_bin = ffmpeg or find_ffmpeg()
     wav_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -96,68 +157,130 @@ def extract_wav(video_path: Path, wav_path: Path, *, ffmpeg: str | None = None) 
         raise RuntimeError(f"ffmpeg failed to extract audio: {err}")
 
 
-def fetch_chatlog(url: str) -> ChatLog:
-    """Fetch live chat; on any failure return available=false."""
-    try:
-        chat = ChatDownloader().get_chat(url)
-        messages: list[ChatMessage] = []
-        for item in chat:
-            if not isinstance(item, dict):
-                continue
-            t = item.get("time_in_seconds")
-            if t is None:
-                continue
-            author_info = item.get("author") or {}
-            author = ""
-            if isinstance(author_info, dict):
-                author = str(author_info.get("name") or "")
-            text = item.get("message")
-            messages.append(
-                ChatMessage(
-                    t=float(t),
-                    author=author,
-                    message="" if text is None else str(text),
+def _classify_chat_error(exc: BaseException) -> str:
+    msg = str(exc).lower()
+    name = type(exc).__name__.lower()
+    if "timeout" in msg or "timed out" in msg:
+        return "timeout"
+    if "no chat" in msg or "chat not found" in msg or "disabled" in msg:
+        return "no_chat"
+    if "parse" in msg or "json" in msg or "decode" in msg:
+        return "parse"
+    if "http" in msg or "403" in msg or "401" in msg:
+        return "http"
+    if "retry" in name:
+        return "unknown"
+    return "unknown"
+
+
+def fetch_chatlog(url: str, *, retries: int = 3) -> ChatLog:
+    """Fetch live/VOD chat with retries; on failure return available=false + reason."""
+    last_reason = "unknown"
+    for attempt in range(retries):
+        try:
+            chat = ChatDownloader().get_chat(url)
+            messages: list[ChatMessage] = []
+            for item in chat:
+                if not isinstance(item, dict):
+                    continue
+                t = item.get("time_in_seconds")
+                if t is None:
+                    continue
+                author_info = item.get("author") or {}
+                author = ""
+                if isinstance(author_info, dict):
+                    author = str(author_info.get("name") or "")
+                text = item.get("message")
+                messages.append(
+                    ChatMessage(
+                        t=float(t),
+                        author=author,
+                        message="" if text is None else str(text),
+                    )
                 )
-            )
-        return ChatLog(available=True, messages=messages)
-    except Exception:
-        return ChatLog(available=False, messages=[])
+            if not messages:
+                return ChatLog(available=False, messages=[], error_reason="no_chat")
+            return ChatLog(available=True, messages=messages, error_reason=None)
+        except Exception as exc:
+            last_reason = _classify_chat_error(exc)
+            if attempt + 1 < retries:
+                time.sleep(1.5 * (2**attempt))
+    return ChatLog(available=False, messages=[], error_reason=last_reason)
 
 
 def info_to_metadata(info: dict[str, Any], url: str) -> Metadata:
     duration = info.get("duration")
+    title = str(info.get("title") or "")
+    channel = str(info.get("channel") or info.get("uploader") or "")
+    channel_id = info.get("channel_id") or info.get("uploader_id")
     return Metadata(
         id=str(info.get("id") or ""),
-        title=str(info.get("title") or ""),
-        channel=str(info.get("channel") or info.get("uploader") or ""),
+        title=title,
+        channel=channel,
         duration_sec=float(duration) if duration is not None else 0.0,
         url=url,
+        stream_type=infer_stream_type(title),
+        channel_id=str(channel_id) if channel_id else None,
     )
 
 
+def apply_channel_defaults(store: JobStore, metadata: Metadata) -> None:
+    ch = load_channel_config(metadata.channel, metadata.channel_id)
+    if not ch:
+        ch = load_channel_config("default")
+    if not ch:
+        return
+    state = store.load()
+    cfg = state.config
+    if ch.get("layout_profile"):
+        cfg.layout_profile = str(ch["layout_profile"])
+    if ch.get("content_type") in {"talk", "game", "auto"}:
+        cfg.content_type = ch["content_type"]  # type: ignore[assignment]
+    if ch.get("initial_prompt"):
+        cfg.initial_prompt = str(ch["initial_prompt"])
+    roi = ch.get("roi")
+    if isinstance(roi, dict):
+        cfg.roi = {str(k): float(v) for k, v in roi.items()}
+    # ROI cache file path reserved
+    slug = re.sub(r"[^\w\-]+", "_", metadata.channel_id or metadata.channel)
+    roi_cache = Path("configs") / "channels" / f"{slug}_roi.json"
+    state.extra["roi_cache"] = str(roi_cache)
+    state.config = cfg
+    store.save(state)
+
+
 def run(job_dir: str | Path, url: str | None = None) -> Metadata:
-    """Download media + chat into job_dir/01_download and return Metadata."""
     paths = JobPaths(job_dir)
     paths.ensure_layout()
     resolved_url = _resolve_url(paths.root, url)
     logger = setup_logger("modules.download", paths.logs / "01_download.log")
     store = JobStore(paths.root)
+    state = store.load()
+    video_height = state.config.video_height
 
     store.mark_running(STEP_NAME)
     try:
         ffmpeg = find_ffmpeg()
-        logger.info("downloading %s", resolved_url)
-        info = download_video(resolved_url, paths.raw_video)
+        logger.info("downloading %s height=%s", resolved_url, video_height)
+        info = download_video(
+            resolved_url,
+            paths.raw_video,
+            video_height=video_height,
+        )
         logger.info("extracting wav -> %s", paths.audio_wav)
         extract_wav(paths.raw_video, paths.audio_wav, ffmpeg=ffmpeg)
 
-        chatlog = fetch_chatlog(resolved_url)
+        chatlog = fetch_chatlog(resolved_url, retries=3)
         if not chatlog.available:
-            logger.warning("chat download failed; writing available=false")
+            logger.warning(
+                "chat download failed reason=%s", chatlog.error_reason or "unknown"
+            )
         write_json(paths.chatlog, chatlog)
 
         metadata = info_to_metadata(info, resolved_url)
+        metadata.chat_error = chatlog.error_reason
         write_json(paths.metadata, metadata)
+        apply_channel_defaults(store, metadata)
 
         store.mark_done(
             STEP_NAME,
@@ -168,7 +291,9 @@ def run(job_dir: str | Path, url: str | None = None) -> Metadata:
                 "metadata": str(paths.metadata),
             },
         )
-        logger.info("download complete: %s", metadata.title)
+        logger.info(
+            "download complete: %s type=%s", metadata.title, metadata.stream_type
+        )
         return metadata
     except Exception as exc:
         store.mark_failed(STEP_NAME, str(exc))

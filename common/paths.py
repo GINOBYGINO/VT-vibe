@@ -79,6 +79,14 @@ class JobPaths:
     def volume_peaks(self) -> Path:
         return self.asr / "volume_peaks.json"
 
+    @property
+    def speech_intervals(self) -> Path:
+        return self.asr / "speech_intervals.json"
+
+    @property
+    def emotion_peaks(self) -> Path:
+        return self.asr / "emotion_peaks.json"
+
     # Module 3
     @property
     def candidates(self) -> Path:
@@ -87,6 +95,26 @@ class JobPaths:
     @property
     def highlights_json(self) -> Path:
         return self.highlights / "highlights.json"
+
+    @property
+    def chapters_json(self) -> Path:
+        return self.highlights / "chapters.json"
+
+    @property
+    def review_queue(self) -> Path:
+        return self.highlights / "review_queue.json"
+
+    @property
+    def review_decisions(self) -> Path:
+        return self.highlights / "review_decisions.json"
+
+    @property
+    def feedback_jsonl(self) -> Path:
+        return self.highlights / "feedback.jsonl"
+
+    @property
+    def crop_meta(self) -> Path:
+        return self.edit / "crop_meta.json"
 
     def short_nosub(self, n: int) -> Path:
         return self.edit / f"short_{n}_nosub.mp4"

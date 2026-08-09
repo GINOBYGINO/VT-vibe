@@ -1,12 +1,11 @@
-# Default fallback (talk-leaning). Prefer weights_talk.yaml / weights_game.yaml.
 clip_min_sec: 45.0
 clip_max_sec: 60.0
 window_step_sec: 5.0
 speech_ratio_min: 0.45
-w_chat: 1.0
-w_vol: 1.2
-w_kw: 1.5
-w_emotion: 0.8
+w_chat: 1.4
+w_vol: 1.0
+w_kw: 1.8
+w_emotion: 1.2
 keywords:
   - 草
   - www
@@ -18,3 +17,8 @@ keywords:
   - 哭啊
   - LOL
   - 爆笑
+  - 欸欸
+  - 安安
+  - 哩勒
+  - 幹嘛
+  - 蛤

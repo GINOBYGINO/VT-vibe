@@ -11,6 +11,8 @@ from common.schemas import (
     ChatLog,
     ChatMessage,
     Metadata,
+    SpeechInterval,
+    SpeechIntervals,
     Transcript,
     TranscriptSegment,
     VolumePeak,
@@ -81,6 +83,7 @@ def test_highlights_quota_2_5h(tmp_path: Path) -> None:
     segments = []
     peaks = []
     messages = []
+    speech_ivs = []
     for hour in range(3):
         center = hour * 3600 + 1800
         if center >= duration:
@@ -88,6 +91,7 @@ def test_highlights_quota_2_5h(tmp_path: Path) -> None:
         segments.append(
             TranscriptSegment(id=hour, start=center, end=center + 5, text="笑死草777")
         )
+        speech_ivs.append(SpeechInterval(start=center - 25, end=center + 35))
         for t in range(int(center - 20), int(center + 20)):
             peaks.append(VolumePeak(t=float(t), rms=1.0, zscore=4.0))
             messages.append(ChatMessage(t=float(t), message="草"))
@@ -97,6 +101,7 @@ def test_highlights_quota_2_5h(tmp_path: Path) -> None:
     write_json(store.paths.full_transcript_json, Transcript(language="zh", segments=segments))
     write_json(store.paths.volume_peaks, VolumePeaks(window_sec=1.0, peaks=peaks))
     write_json(store.paths.chatlog, ChatLog(available=True, messages=messages))
+    write_json(store.paths.speech_intervals, SpeechIntervals(intervals=speech_ivs))
 
     result = run(job_dir)
     assert len(result.highlights) >= 3

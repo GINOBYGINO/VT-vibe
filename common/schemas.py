@@ -6,6 +6,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+StreamType = Literal["talk", "game", "unknown"]
+ContentType = Literal["talk", "game", "auto"]
+
 
 class Metadata(BaseModel):
     id: str
@@ -13,6 +16,9 @@ class Metadata(BaseModel):
     channel: str
     duration_sec: float
     url: str
+    stream_type: StreamType = "unknown"
+    chat_error: str | None = None
+    channel_id: str | None = None
 
 
 class ChatMessage(BaseModel):
@@ -24,6 +30,7 @@ class ChatMessage(BaseModel):
 class ChatLog(BaseModel):
     available: bool = True
     messages: list[ChatMessage] = Field(default_factory=list)
+    error_reason: str | None = None
 
 
 class TranscriptSegment(BaseModel):
@@ -49,6 +56,26 @@ class VolumePeaks(BaseModel):
     peaks: list[VolumePeak] = Field(default_factory=list)
 
 
+class SpeechInterval(BaseModel):
+    start: float
+    end: float
+
+
+class SpeechIntervals(BaseModel):
+    intervals: list[SpeechInterval] = Field(default_factory=list)
+
+
+class EmotionPeak(BaseModel):
+    t: float
+    score: float
+    kind: Literal["laugh", "scream", "burst"] = "burst"
+
+
+class EmotionPeaks(BaseModel):
+    window_sec: float = 0.25
+    peaks: list[EmotionPeak] = Field(default_factory=list)
+
+
 class Highlight(BaseModel):
     id: int
     start: float
@@ -58,12 +85,46 @@ class Highlight(BaseModel):
     suggested_hook: str = ""
     score: float = 0.0
     hour_bucket: int = 0
+    chapter_id: int | None = None
+    speech_ratio: float = 0.0
     start_display: str | None = None
     end_display: str | None = None
 
 
 class HighlightsFile(BaseModel):
     highlights: list[Highlight] = Field(default_factory=list)
+
+
+class Chapter(BaseModel):
+    id: int
+    start: float
+    end: float
+    title: str
+
+
+class ChaptersFile(BaseModel):
+    chapters: list[Chapter] = Field(default_factory=list)
+
+
+class ReviewDecision(BaseModel):
+    candidate_id: int
+    action: Literal["keep", "reject"]
+    title: str | None = None
+    hook: str | None = None
+    start: float | None = None
+    end: float | None = None
+
+
+class ReviewDecisionsFile(BaseModel):
+    decisions: list[ReviewDecision] = Field(default_factory=list)
+
+
+class CropMeta(BaseModel):
+    layout: str = "letterbox_blur"
+    content_h_ratio: float = 0.72
+    roi: dict[str, float] = Field(default_factory=dict)
+    hook_text: str = ""
+    jump_cuts: list[dict[str, float]] = Field(default_factory=list)
 
 
 class StepState(BaseModel):
@@ -81,6 +142,14 @@ class JobConfig(BaseModel):
     whisper_model: str = "medium"
     max_hours: float | None = None
     allow_cpu: bool = False
+    content_type: ContentType = "auto"
+    layout_profile: str = "letterbox_blur"
+    video_height: int | None = 720
+    subtitle_style: str = "funny"
+    enable_hook: bool = True
+    letterbox_ratio: float = 0.72
+    initial_prompt: str = ""
+    roi: dict[str, float] = Field(default_factory=dict)
 
 
 class JobState(BaseModel):

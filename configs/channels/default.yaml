@@ -1,0 +1,5 @@
+layout_profile: letterbox_blur
+content_type: auto
+initial_prompt: "這是台灣 VTuber 直播，常見用語：欸欸、草、笑死、777、安安。"
+dictionary_extra: {}
+roi: {}

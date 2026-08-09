@@ -5,10 +5,12 @@ from common.job_store import JobStore
 from common.paths import JobPaths
 from common.schemas import (
     ChatLog,
+    EmotionPeaks,
     Highlight,
     HighlightsFile,
     JobState,
     Metadata,
+    SpeechIntervals,
     Transcript,
     VolumePeaks,
 )
@@ -19,10 +21,12 @@ __all__ = [
     "JobStore",
     "JobPaths",
     "ChatLog",
+    "EmotionPeaks",
     "Highlight",
     "HighlightsFile",
     "JobState",
     "Metadata",
+    "SpeechIntervals",
     "Transcript",
     "VolumePeaks",
 ]

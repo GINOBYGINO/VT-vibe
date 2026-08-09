@@ -1,4 +1,4 @@
-"""Module 2: ASR (faster-whisper) + volume peak analysis."""
+"""Module 2: ASR (faster-whisper) + volume / VAD / emotion peaks."""
 
 from __future__ import annotations
 
@@ -9,22 +9,34 @@ from pathlib import Path
 import librosa
 import numpy as np
 
-from common.io import configs_dir, read_json, write_json
+from common.channel_config import load_channel_config
+from common.io import configs_dir, read_json, read_model, write_json
 from common.job_store import JobStore
 from common.logging_utils import setup_logger
 from common.paths import JobPaths
-from common.schemas import Transcript, TranscriptSegment, VolumePeak, VolumePeaks
+from common.schemas import (
+    EmotionPeak,
+    EmotionPeaks,
+    Metadata,
+    SpeechInterval,
+    SpeechIntervals,
+    Transcript,
+    TranscriptSegment,
+    VolumePeak,
+    VolumePeaks,
+)
 from common.timecode import seconds_to_timestamp
 
 STEP_NAME = "02_asr"
 WINDOW_SEC = 1.0
+EMOTION_WINDOW_SEC = 0.25
 DEFAULT_MODEL = "medium"
+DEFAULT_PROMPT = "這是台灣 VTuber 直播，常見用語：欸欸、草、笑死、777、安安。"
 
 TranscribeFn = Callable[..., Transcript]
 
 
 def load_dictionary(path: str | Path | None = None) -> dict[str, str]:
-    """Load post-process string replacements from custom_dictionary.json."""
     dict_path = Path(path) if path is not None else configs_dir() / "custom_dictionary.json"
     if not dict_path.is_file():
         return {}
@@ -35,7 +47,6 @@ def load_dictionary(path: str | Path | None = None) -> dict[str, str]:
 
 
 def apply_dictionary(text: str, dictionary: dict[str, str]) -> str:
-    """Apply dictionary replacements (longer keys first to avoid partial clashes)."""
     if not text or not dictionary:
         return text
     result = text
@@ -67,7 +78,6 @@ def compute_volume_peaks(
     *,
     window_sec: float = WINDOW_SEC,
 ) -> VolumePeaks:
-    """Frame RMS per window_sec and compute z-scores; store every window as a peak."""
     y, sr = librosa.load(str(audio_path), sr=None, mono=True)
     if y.size == 0:
         return VolumePeaks(window_sec=window_sec, peaks=[])
@@ -76,15 +86,10 @@ def compute_volume_peaks(
     hop_length = frame_length
     rms = librosa.feature.rms(y=y, frame_length=frame_length, hop_length=hop_length)[0]
     times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop_length)
-
     rms_f = rms.astype(np.float64)
     mean = float(np.mean(rms_f)) if rms_f.size else 0.0
     std = float(np.std(rms_f)) if rms_f.size else 0.0
-    if std < 1e-12:
-        zscores = np.zeros_like(rms_f)
-    else:
-        zscores = (rms_f - mean) / std
-
+    zscores = np.zeros_like(rms_f) if std < 1e-12 else (rms_f - mean) / std
     peaks = [
         VolumePeak(t=float(t), rms=float(r), zscore=float(z))
         for t, r, z in zip(times, rms_f, zscores, strict=True)
@@ -92,13 +97,124 @@ def compute_volume_peaks(
     return VolumePeaks(window_sec=window_sec, peaks=peaks)
 
 
+def compute_speech_intervals(
+    audio_path: str | Path,
+    *,
+    frame_sec: float = 0.05,
+    merge_gap_sec: float = 0.35,
+    min_len_sec: float = 0.25,
+    energy_percentile: float = 35.0,
+) -> SpeechIntervals:
+    """Energy-based VAD intervals for modules 3/4/5."""
+    y, sr = librosa.load(str(audio_path), sr=None, mono=True)
+    if y.size == 0:
+        return SpeechIntervals(intervals=[])
+
+    frame = max(1, int(round(sr * frame_sec)))
+    rms = librosa.feature.rms(y=y, frame_length=frame, hop_length=frame)[0]
+    times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=frame)
+    if rms.size == 0:
+        return SpeechIntervals(intervals=[])
+
+    thr = float(np.percentile(rms, energy_percentile))
+    thr = max(thr, float(np.mean(rms)) * 0.35)
+    active = rms >= thr
+
+    raw: list[tuple[float, float]] = []
+    start: float | None = None
+    for i, is_on in enumerate(active):
+        t = float(times[i])
+        if is_on and start is None:
+            start = t
+        elif not is_on and start is not None:
+            end = t
+            if end - start >= min_len_sec:
+                raw.append((start, end))
+            start = None
+    if start is not None:
+        end = float(times[-1] + frame_sec)
+        if end - start >= min_len_sec:
+            raw.append((start, end))
+
+    if not raw:
+        return SpeechIntervals(intervals=[])
+
+    merged: list[list[float]] = [[raw[0][0], raw[0][1]]]
+    for s, e in raw[1:]:
+        if s - merged[-1][1] <= merge_gap_sec:
+            merged[-1][1] = e
+        else:
+            merged.append([s, e])
+    return SpeechIntervals(
+        intervals=[SpeechInterval(start=a, end=b) for a, b in merged]
+    )
+
+
+def speech_intervals_from_transcript(transcript: Transcript) -> SpeechIntervals:
+    """Fallback / merge helper from ASR segments."""
+    intervals = [
+        SpeechInterval(start=seg.start, end=seg.end)
+        for seg in transcript.segments
+        if seg.end > seg.start and (seg.text or "").strip()
+    ]
+    return SpeechIntervals(intervals=intervals)
+
+
+def merge_speech_intervals(a: SpeechIntervals, b: SpeechIntervals) -> SpeechIntervals:
+    pairs = [(i.start, i.end) for i in a.intervals] + [(i.start, i.end) for i in b.intervals]
+    if not pairs:
+        return SpeechIntervals(intervals=[])
+    pairs.sort()
+    merged: list[list[float]] = [[pairs[0][0], pairs[0][1]]]
+    for s, e in pairs[1:]:
+        if s <= merged[-1][1] + 0.2:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return SpeechIntervals(
+        intervals=[SpeechInterval(start=x, end=y) for x, y in merged]
+    )
+
+
+def compute_emotion_peaks(
+    audio_path: str | Path,
+    *,
+    window_sec: float = EMOTION_WINDOW_SEC,
+    z_threshold: float = 2.5,
+) -> EmotionPeaks:
+    """Burst / laugh-scream proxy via short-window RMS z-score."""
+    y, sr = librosa.load(str(audio_path), sr=None, mono=True)
+    if y.size == 0:
+        return EmotionPeaks(window_sec=window_sec, peaks=[])
+
+    frame = max(1, int(round(sr * window_sec)))
+    rms = librosa.feature.rms(y=y, frame_length=frame, hop_length=frame)[0]
+    times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=frame)
+    rms_f = rms.astype(np.float64)
+    mean = float(np.mean(rms_f)) if rms_f.size else 0.0
+    std = float(np.std(rms_f)) if rms_f.size else 0.0
+    if std < 1e-12:
+        return EmotionPeaks(window_sec=window_sec, peaks=[])
+
+    peaks: list[EmotionPeak] = []
+    for t, r in zip(times, rms_f, strict=True):
+        z = (float(r) - mean) / std
+        if z < z_threshold:
+            continue
+        kind: str = "burst"
+        if z >= 4.0:
+            kind = "scream"
+        elif z >= 3.0:
+            kind = "laugh"
+        peaks.append(EmotionPeak(t=float(t), score=float(z), kind=kind))  # type: ignore[arg-type]
+    return EmotionPeaks(window_sec=window_sec, peaks=peaks)
+
+
 def format_srt_timestamp(seconds: float) -> str:
-    """SRT uses comma as millisecond separator."""
     return seconds_to_timestamp(seconds, millis=True).replace(".", ",")
 
 
 def segments_to_srt(segments: list[TranscriptSegment]) -> str:
-    """Serialize transcript segments to SubRip (.srt) text."""
     blocks: list[str] = []
     for i, seg in enumerate(segments, start=1):
         idx = seg.id if seg.id is not None else i
@@ -114,12 +230,10 @@ def _env_allow_cpu() -> bool:
 
 
 def _resolve_allow_cpu(allow_cpu: bool | None) -> bool:
-    """Allow CPU if explicit flag/config is True or ALLOW_CPU=1."""
     return bool(allow_cpu) or _env_allow_cpu()
 
 
 def load_whisper_model(model_size: str, *, allow_cpu: bool):
-    """Load faster-whisper WhisperModel; CUDA by default, optional CPU fallback."""
     from common.cuda_path import ensure_cuda_dll_path
     from faster_whisper import WhisperModel
 
@@ -141,13 +255,16 @@ def _transcribe_with_whisper(
     model_size: str,
     allow_cpu: bool,
     language: str | None,
+    initial_prompt: str | None,
 ) -> Transcript:
     model = load_whisper_model(model_size, allow_cpu=allow_cpu)
-    segments_iter, info = model.transcribe(
-        str(audio_path),
-        language=language or None,
-        vad_filter=True,
-    )
+    kwargs: dict = {
+        "language": language or None,
+        "vad_filter": True,
+    }
+    if initial_prompt:
+        kwargs["initial_prompt"] = initial_prompt
+    segments_iter, info = model.transcribe(str(audio_path), **kwargs)
     segments: list[TranscriptSegment] = []
     for i, seg in enumerate(segments_iter):
         segments.append(
@@ -162,7 +279,6 @@ def _transcribe_with_whisper(
     return Transcript(language=str(detected), segments=segments)
 
 
-# Tests may assign a callable here to skip downloading Whisper models.
 _transcribe_mock: TranscribeFn | None = None
 
 
@@ -173,14 +289,6 @@ def run(
     allow_cpu: bool | None = None,
     transcribe_fn: TranscribeFn | None = None,
 ) -> Transcript:
-    """
-    Run ASR + volume analysis for a job directory.
-
-    Writes:
-      - 02_asr/full_transcript.json
-      - 02_asr/full_transcript.srt
-      - 02_asr/volume_peaks.json
-    """
     paths = JobPaths(job_dir)
     paths.ensure_layout()
     logger = setup_logger("modules.asr", paths.logs / f"{STEP_NAME}.log")
@@ -193,6 +301,8 @@ def run(
     language = "zh"
     resolved_model = model_size or DEFAULT_MODEL
     cfg_allow_cpu: bool | None = allow_cpu
+    initial_prompt = DEFAULT_PROMPT
+    dictionary = load_dictionary()
 
     if paths.job_json.is_file():
         store = JobStore(job_dir)
@@ -202,10 +312,20 @@ def run(
         if allow_cpu is None:
             cfg_allow_cpu = state.config.allow_cpu
         language = state.config.language or "zh"
+        if state.config.initial_prompt:
+            initial_prompt = state.config.initial_prompt
         store.mark_running(STEP_NAME)
 
+    if paths.metadata.is_file():
+        meta = read_model(paths.metadata, Metadata)
+        ch = load_channel_config(meta.channel, meta.channel_id)
+        if ch.get("initial_prompt"):
+            initial_prompt = str(ch["initial_prompt"])
+        extra = ch.get("dictionary_extra") or {}
+        if isinstance(extra, dict):
+            dictionary = {**dictionary, **{str(k): str(v) for k, v in extra.items()}}
+
     resolved_allow_cpu = _resolve_allow_cpu(cfg_allow_cpu)
-    dictionary = load_dictionary()
 
     try:
         fn = transcribe_fn if transcribe_fn is not None else _transcribe_mock
@@ -221,7 +341,7 @@ def run(
                 transcript = Transcript.model_validate(transcript)
         else:
             logger.info(
-                "transcribing %s with model=%s allow_cpu=%s",
+                "transcribing %s model=%s allow_cpu=%s",
                 audio_path,
                 resolved_model,
                 resolved_allow_cpu,
@@ -231,10 +351,10 @@ def run(
                 model_size=resolved_model,
                 allow_cpu=resolved_allow_cpu,
                 language=language,
+                initial_prompt=initial_prompt,
             )
 
         transcript = apply_dictionary_to_transcript(transcript, dictionary)
-
         write_json(paths.full_transcript_json, transcript)
         paths.full_transcript_srt.write_text(
             segments_to_srt(transcript.segments),
@@ -244,6 +364,14 @@ def run(
         peaks = compute_volume_peaks(audio_path, window_sec=WINDOW_SEC)
         write_json(paths.volume_peaks, peaks)
 
+        energy_speech = compute_speech_intervals(audio_path)
+        asr_speech = speech_intervals_from_transcript(transcript)
+        speech = merge_speech_intervals(energy_speech, asr_speech)
+        write_json(paths.speech_intervals, speech)
+
+        emotion = compute_emotion_peaks(audio_path)
+        write_json(paths.emotion_peaks, emotion)
+
         if store is not None:
             store.mark_done(
                 STEP_NAME,
@@ -251,12 +379,16 @@ def run(
                     "full_transcript_json": str(paths.full_transcript_json),
                     "full_transcript_srt": str(paths.full_transcript_srt),
                     "volume_peaks": str(paths.volume_peaks),
+                    "speech_intervals": str(paths.speech_intervals),
+                    "emotion_peaks": str(paths.emotion_peaks),
                 },
             )
         logger.info(
-            "ASR done: %d segments, %d volume windows",
+            "ASR done: %d segs, %d vol, %d speech, %d emotion",
             len(transcript.segments),
             len(peaks.peaks),
+            len(speech.intervals),
+            len(emotion.peaks),
         )
         return transcript
     except Exception as exc:

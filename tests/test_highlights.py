@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from common.schemas import ChatMessage, TranscriptSegment, VolumePeak
+from common.schemas import (
+    ChatMessage,
+    SpeechInterval,
+    SpeechIntervals,
+    TranscriptSegment,
+    VolumePeak,
+)
 from modules.highlights.scoring import (
     chat_density,
     hour_bucket_count,
@@ -32,11 +38,14 @@ def test_score_window_positive() -> None:
         end=60,
         messages=[ChatMessage(t=5, message="777")],
         peaks=[VolumePeak(t=5, rms=0.5, zscore=2.0)],
+        emotion_peaks=[],
         segments=[TranscriptSegment(id=0, start=1, end=2, text="笑死了")],
+        speech=SpeechIntervals(intervals=[SpeechInterval(start=0, end=50)]),
         keywords=["笑死"],
         w_chat=1.0,
         w_vol=1.0,
         w_kw=1.0,
+        w_emotion=0.8,
     )
     assert ws.score > 0
     assert "笑死" in make_title("笑死了哈哈哈哈哈哈哈哈哈哈哈哈")
