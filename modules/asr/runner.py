@@ -97,6 +97,23 @@ def compute_volume_peaks(
     return VolumePeaks(window_sec=window_sec, peaks=peaks)
 
 
+def _merge_pairs(
+    pairs: list[tuple[float, float]],
+    *,
+    merge_gap_sec: float,
+) -> list[tuple[float, float]]:
+    if not pairs:
+        return []
+    ordered = sorted(pairs, key=lambda p: p[0])
+    merged: list[list[float]] = [[ordered[0][0], ordered[0][1]]]
+    for s, e in ordered[1:]:
+        if s - merged[-1][1] <= merge_gap_sec:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return [(a, b) for a, b in merged]
+
+
 def compute_speech_intervals(
     audio_path: str | Path,
     *,
@@ -104,11 +121,18 @@ def compute_speech_intervals(
     merge_gap_sec: float = 0.35,
     min_len_sec: float = 0.25,
     energy_percentile: float = 35.0,
+    use_hpss: bool = False,
 ) -> SpeechIntervals:
-    """Energy-based VAD intervals for modules 3/4/5."""
+    """Energy-based VAD intervals (optional harmonic HPSS for BGM rejection)."""
     y, sr = librosa.load(str(audio_path), sr=None, mono=True)
     if y.size == 0:
         return SpeechIntervals(intervals=[])
+
+    if use_hpss:
+        try:
+            y, _ = librosa.effects.hpss(y)
+        except Exception:
+            pass
 
     frame = max(1, int(round(sr * frame_sec)))
     rms = librosa.feature.rms(y=y, frame_length=frame, hop_length=frame)[0]
@@ -136,44 +160,139 @@ def compute_speech_intervals(
         if end - start >= min_len_sec:
             raw.append((start, end))
 
-    if not raw:
-        return SpeechIntervals(intervals=[])
-
-    merged: list[list[float]] = [[raw[0][0], raw[0][1]]]
-    for s, e in raw[1:]:
-        if s - merged[-1][1] <= merge_gap_sec:
-            merged[-1][1] = e
-        else:
-            merged.append([s, e])
+    merged = _merge_pairs(raw, merge_gap_sec=merge_gap_sec)
     return SpeechIntervals(
         intervals=[SpeechInterval(start=a, end=b) for a, b in merged]
     )
 
 
-def speech_intervals_from_transcript(transcript: Transcript) -> SpeechIntervals:
-    """Fallback / merge helper from ASR segments."""
-    intervals = [
-        SpeechInterval(start=seg.start, end=seg.end)
+def speech_intervals_from_transcript(
+    transcript: Transcript,
+    *,
+    merge_gap_sec: float = 0.35,
+) -> SpeechIntervals:
+    """ASR segments as primary voice intervals; merge near-adjacent gaps."""
+    pairs = [
+        (float(seg.start), float(seg.end))
         for seg in transcript.segments
         if seg.end > seg.start and (seg.text or "").strip()
     ]
-    return SpeechIntervals(intervals=intervals)
+    merged = _merge_pairs(pairs, merge_gap_sec=merge_gap_sec)
+    return SpeechIntervals(
+        intervals=[SpeechInterval(start=a, end=b) for a, b in merged]
+    )
 
 
-def merge_speech_intervals(a: SpeechIntervals, b: SpeechIntervals) -> SpeechIntervals:
-    pairs = [(i.start, i.end) for i in a.intervals] + [(i.start, i.end) for i in b.intervals]
-    if not pairs:
+def interval_iou(a: SpeechInterval, b: SpeechInterval) -> float:
+    inter = max(0.0, min(a.end, b.end) - max(a.start, b.start))
+    if inter <= 0:
+        return 0.0
+    union = max(a.end, b.end) - min(a.start, b.start)
+    if union <= 0:
+        return 0.0
+    return inter / union
+
+
+def filter_energy_by_asr_iou(
+    energy: SpeechIntervals,
+    asr: SpeechIntervals,
+    *,
+    iou_min: float = 0.2,
+) -> SpeechIntervals:
+    """Keep energy intervals only when they overlap ASR (blocks BGM-only)."""
+    if not asr.intervals:
         return SpeechIntervals(intervals=[])
-    pairs.sort()
-    merged: list[list[float]] = [[pairs[0][0], pairs[0][1]]]
-    for s, e in pairs[1:]:
-        if s <= merged[-1][1] + 0.2:
-            merged[-1][1] = max(merged[-1][1], e)
-        else:
-            merged.append([s, e])
+    kept: list[SpeechInterval] = []
+    for ev in energy.intervals:
+        if any(interval_iou(ev, av) > iou_min for av in asr.intervals):
+            kept.append(ev)
+    return SpeechIntervals(intervals=kept)
+
+
+def refine_asr_endpoints_with_energy(
+    asr: SpeechIntervals,
+    energy_filtered: SpeechIntervals,
+    *,
+    pad: float = 0.15,
+) -> SpeechIntervals:
+    """Slightly expand ASR endpoints using IoU-filtered energy intervals."""
+    if not asr.intervals:
+        return asr
+    out: list[SpeechInterval] = []
+    for av in asr.intervals:
+        start, end = av.start, av.end
+        for ev in energy_filtered.intervals:
+            if interval_iou(av, ev) <= 0.2 and not (
+                ev.end > av.start - pad and ev.start < av.end + pad
+            ):
+                continue
+            if ev.end > av.start - pad and ev.start < av.end + pad:
+                start = min(start, ev.start)
+                end = max(end, ev.end)
+        out.append(SpeechInterval(start=start, end=end))
+    merged = _merge_pairs([(i.start, i.end) for i in out], merge_gap_sec=0.35)
+    return SpeechIntervals(
+        intervals=[SpeechInterval(start=a, end=b) for a, b in merged]
+    )
+
+
+def merge_speech_intervals(
+    a: SpeechIntervals,
+    b: SpeechIntervals,
+    *,
+    merge_gap_sec: float = 0.2,
+) -> SpeechIntervals:
+    pairs = [(i.start, i.end) for i in a.intervals] + [
+        (i.start, i.end) for i in b.intervals
+    ]
+    merged = _merge_pairs(pairs, merge_gap_sec=merge_gap_sec)
     return SpeechIntervals(
         intervals=[SpeechInterval(start=x, end=y) for x, y in merged]
     )
+
+
+def build_speech_intervals(
+    transcript: Transcript,
+    audio_path: str | Path | None,
+    *,
+    vad_mode: str = "asr_primary",
+    use_hpss: bool = False,
+) -> tuple[SpeechIntervals, dict]:
+    """
+    Build voice intervals. Default asr_primary: ASR segments lead;
+    energy VAD only reinforces endpoints after IoU>0.2 filter (anti-BGM).
+    """
+    asr = speech_intervals_from_transcript(transcript, merge_gap_sec=0.35)
+    energy = SpeechIntervals(intervals=[])
+    if audio_path is not None and Path(audio_path).is_file():
+        energy = compute_speech_intervals(audio_path, use_hpss=use_hpss)
+
+    mode = (vad_mode or "asr_primary").strip().lower()
+    energy_kept = filter_energy_by_asr_iou(energy, asr, iou_min=0.2)
+
+    if mode == "energy":
+        speech = energy if energy.intervals else asr
+        source = "energy" if energy.intervals else "asr"
+    elif mode == "merged":
+        speech = merge_speech_intervals(asr, energy_kept)
+        source = "merged"
+    else:
+        speech = refine_asr_endpoints_with_energy(asr, energy_kept)
+        source = "asr"
+
+    debug = {
+        "vad_mode": mode,
+        "use_hpss": use_hpss,
+        "source": source,
+        "asr_count": len(asr.intervals),
+        "energy_count": len(energy.intervals),
+        "energy_kept_count": len(energy_kept.intervals),
+        "merged_count": len(speech.intervals),
+        "asr_total_sec": round(sum(i.end - i.start for i in asr.intervals), 3),
+        "energy_total_sec": round(sum(i.end - i.start for i in energy.intervals), 3),
+        "speech_total_sec": round(sum(i.end - i.start for i in speech.intervals), 3),
+    }
+    return speech, debug
 
 
 def compute_emotion_peaks(
@@ -303,6 +422,8 @@ def run(
     cfg_allow_cpu: bool | None = allow_cpu
     initial_prompt = DEFAULT_PROMPT
     dictionary = load_dictionary()
+    vad_mode = "asr_primary"
+    vad_use_hpss = False
 
     if paths.job_json.is_file():
         store = JobStore(job_dir)
@@ -314,6 +435,8 @@ def run(
         language = state.config.language or "zh"
         if state.config.initial_prompt:
             initial_prompt = state.config.initial_prompt
+        vad_mode = state.config.vad_mode or "asr_primary"
+        vad_use_hpss = bool(state.config.vad_use_hpss)
         store.mark_running(STEP_NAME)
 
     if paths.metadata.is_file():
@@ -364,10 +487,14 @@ def run(
         peaks = compute_volume_peaks(audio_path, window_sec=WINDOW_SEC)
         write_json(paths.volume_peaks, peaks)
 
-        energy_speech = compute_speech_intervals(audio_path)
-        asr_speech = speech_intervals_from_transcript(transcript)
-        speech = merge_speech_intervals(energy_speech, asr_speech)
+        speech, speech_debug = build_speech_intervals(
+            transcript,
+            audio_path,
+            vad_mode=vad_mode,
+            use_hpss=vad_use_hpss,
+        )
         write_json(paths.speech_intervals, speech)
+        write_json(paths.speech_intervals_debug, speech_debug)
 
         emotion = compute_emotion_peaks(audio_path)
         write_json(paths.emotion_peaks, emotion)
@@ -380,14 +507,17 @@ def run(
                     "full_transcript_srt": str(paths.full_transcript_srt),
                     "volume_peaks": str(paths.volume_peaks),
                     "speech_intervals": str(paths.speech_intervals),
+                    "speech_intervals_debug": str(paths.speech_intervals_debug),
                     "emotion_peaks": str(paths.emotion_peaks),
                 },
             )
         logger.info(
-            "ASR done: %d segs, %d vol, %d speech, %d emotion",
+            "ASR done: %d segs, %d vol, %d speech (mode=%s source=%s), %d emotion",
             len(transcript.segments),
             len(peaks.peaks),
             len(speech.intervals),
+            speech_debug.get("vad_mode"),
+            speech_debug.get("source"),
             len(emotion.peaks),
         )
         return transcript

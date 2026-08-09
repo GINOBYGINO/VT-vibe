@@ -84,8 +84,16 @@ class JobPaths:
         return self.asr / "speech_intervals.json"
 
     @property
+    def speech_intervals_debug(self) -> Path:
+        return self.asr / "speech_intervals_debug.json"
+
+    @property
     def emotion_peaks(self) -> Path:
         return self.asr / "emotion_peaks.json"
+
+    @property
+    def smoke_report(self) -> Path:
+        return self.root / "smoke_report.json"
 
     # Module 3
     @property

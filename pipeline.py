@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import traceback
@@ -13,9 +14,9 @@ from rich.panel import Panel
 from rich.table import Table
 
 from common.constants import DEFAULT_TEST_URL, STEP_NAMES
-from common.io import project_root
+from common.io import project_root, read_json, write_json
 from common.job_store import JobStore
-from common.schemas import JobConfig
+from common.schemas import JobConfig, Metadata
 
 console = Console()
 
@@ -29,7 +30,7 @@ STEP_RUNNERS = {
 
 REGRESSION_URLS = {
     "1": DEFAULT_TEST_URL,
-    "2": "https://www.youtube.com/live/PjMOuWoBiAY",
+    "2": "https://www.youtube.com/watch?v=PjMOuWoBiAY",
     "3": "https://www.youtube.com/watch?v=KWcF-F0ozQ8",
 }
 
@@ -53,6 +54,55 @@ def render_status(store: JobStore) -> None:
         err = (step.error or "")[:80] if step else ""
         table.add_row(name, status, err)
     console.print(table)
+
+
+def _write_smoke_report(job_path: Path) -> dict:
+    """Write jobs/.../smoke_report.json with cuts / duration / stream_type."""
+    store = JobStore(job_path)
+    state = store.load()
+    paths = store.paths
+    meta = None
+    if paths.metadata.is_file():
+        meta = Metadata.model_validate(read_json(paths.metadata))
+
+    clips = 0
+    avg_cuts = 0.0
+    multi_cut = 0
+    if paths.crop_meta.is_file():
+        crop = read_json(paths.crop_meta)
+        if isinstance(crop, dict):
+            stats = crop.get("cuts_stats") or {}
+            clips = int(stats.get("clip_count") or len(crop.get("clips") or []))
+            avg_cuts = float(stats.get("avg_cuts") or 0.0)
+            multi_cut = int(stats.get("multi_cut_clips") or 0)
+            if not stats and crop.get("clips"):
+                cut_lens = [len(c.get("cuts") or []) for c in crop["clips"]]
+                clips = len(cut_lens)
+                avg_cuts = sum(cut_lens) / clips if clips else 0.0
+                multi_cut = sum(1 for n in cut_lens if n >= 2)
+
+    chat_error = None
+    if paths.chatlog.is_file():
+        chat = read_json(paths.chatlog)
+        if isinstance(chat, dict):
+            chat_error = chat.get("error_reason")
+
+    report = {
+        "job_id": state.job_id,
+        "status": state.status,
+        "url": state.url,
+        "duration_sec": float(meta.duration_sec) if meta else None,
+        "stream_type": meta.stream_type if meta else None,
+        "content_type": state.config.content_type,
+        "max_hours": state.config.max_hours,
+        "clips": clips,
+        "avg_cuts": round(avg_cuts, 3),
+        "multi_cut_clips": multi_cut,
+        "chat_error_reason": chat_error or (meta.chat_error if meta else None),
+        "vad_mode": state.config.vad_mode,
+    }
+    write_json(paths.smoke_report, report)
+    return report
 
 
 def run_pipeline(
@@ -105,7 +155,7 @@ def run_pipeline(
         store.save(state)
 
     job_path = store.paths.root
-    console.print(Panel(f"[bold]Pipeline v0.2[/bold]\njob_dir={job_path}"))
+    console.print(Panel(f"[bold]Pipeline v0.3[/bold]\njob_dir={job_path}"))
 
     for index, step_name in enumerate(STEP_NAMES, start=1):
         if index < from_step:
@@ -144,16 +194,35 @@ def run_pipeline(
             store.mark_failed(step_name, err)
             console.print(f"[red]✗ {step_name} failed[/red]")
             console.print(err)
+            try:
+                report = _write_smoke_report(job_path)
+                console.print(f"[yellow]smoke_report[/yellow] {json.dumps(report, ensure_ascii=False)}")
+            except Exception:
+                pass
             render_status(store)
             raise
 
+    state = store.load()
+    if state.status != "completed":
+        state.status = "completed"
+        store.save(state)
+
+    report = _write_smoke_report(job_path)
     render_status(store)
+    console.print(
+        Panel(
+            f"clips={report['clips']} avg_cuts={report['avg_cuts']} "
+            f"multi_cut={report['multi_cut_clips']} "
+            f"stream_type={report['stream_type']} "
+            f"chat_error={report['chat_error_reason']}"
+        )
+    )
     console.print("[bold green]Pipeline completed[/bold green]")
     return job_path
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="VTuber highlight pipeline v0.2")
+    parser = argparse.ArgumentParser(description="VTuber highlight pipeline v0.3")
     parser.add_argument("--url", default=None, help="YouTube URL")
     parser.add_argument("--job-dir", default=None, help="Existing job directory")
     parser.add_argument(

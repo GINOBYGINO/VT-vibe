@@ -1,5 +1,8 @@
 clip_min_sec: 45.0
 clip_max_sec: 60.0
+story_min_sec: 45.0
+story_max_sec: 120.0
+story_gap_max_sec: 25.0
 window_step_sec: 5.0
 speech_ratio_min: 0.45
 w_chat: 1.4

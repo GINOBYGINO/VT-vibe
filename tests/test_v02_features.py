@@ -110,6 +110,7 @@ def test_highlights_speech_filter(tmp_path: Path) -> None:
     result = run(paths.root)
     assert len(result.highlights) >= 2
     for h in result.highlights:
-        assert h.end - h.start <= 60.0 + 1e-6
+        assert h.end - h.start <= 120.0 + 1e-6
+        assert h.arc_id is not None
     assert paths.review_queue.is_file()
     assert paths.chapters_json.is_file()

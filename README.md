@@ -1,6 +1,6 @@
-# VTuber 精華自動剪輯（v0.2）
+# VTuber 精華自動剪輯（v0.3）
 
-JSON 驅動五模組 pipeline：下載 → ASR/VAD → 高光 → letterbox 剪輯 → 防暴雷字幕。
+JSON 驅動五模組 pipeline：下載 → ASR 主人聲 VAD → 故事弧高光 → jump-cut 剪輯 → 字幕框防暴雷。
 
 ## 需求
 
@@ -52,15 +52,15 @@ python -m modules.highlights.preview --job-dir jobs\<job_id>
 pytest -q
 ```
 
-## v0.2 重點
+## v0.3 重點
 
-- 語音區間 `speech_intervals.json` + 情緒峰值；高光需通過 `speech_ratio`
-- 模糊 letterbox、開頭 Hook 橫幅、長靜音 jump-cut
-- 字幕中上 + 防暴雷（不重疊、max 4.5s）
-- `weights_talk.yaml` / `weights_game.yaml`；`configs/styles/`
-- chat 失敗寫 `error_reason`；標題推 `stream_type`
+- **ASR 主人聲區間**：`speech_intervals` 以字幕段為主，能量 VAD 僅 IoU>0.2 補強（抗 BGM）
+- **Jump-cut**：無人聲間隙 ≥0.45s 切除；`crop_meta.clips[].cuts` + `smoke_report.json`
+- **字幕框**：固定 `\clip` + 約 17 字換行；顯示對齊人聲，靜音不字幕
+- **故事弧**：同章節連續候選合併 **45–120s**（`arc_id` / `merged_from`）
+- 延續 v0.2：letterbox、Hook、`weights_talk/game`、chat `error_reason`
 
 ## 產出
 
 `jobs/{job_id}/05_subtitle/short_{n}_final.mp4`  
-每小時至少 1 條、每條 ≤ 60 秒。
+每小時至少 1 條故事弧、每條 **45–120 秒**（內部可 jump-cut）。

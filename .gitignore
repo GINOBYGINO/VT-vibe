@@ -9,4 +9,6 @@ build/
 .mypy_cache/
 jobs/
 e2e_*.log
-e2e_v02_*.log
+e2e_v0*.log
+e2e_*_stdout.log
+e2e_*_stderr.log

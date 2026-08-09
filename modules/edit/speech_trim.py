@@ -24,7 +24,7 @@ def refine_bounds(
     intervals: SpeechIntervals,
     *,
     pad: float = 0.3,
-    max_sec: float = 60.0,
+    max_sec: float = 120.0,
 ) -> tuple[float, float]:
     """Snap to nearby speech; keep at most ``pad`` silence at edges."""
     if end <= start:
@@ -51,7 +51,7 @@ def jump_cut_segments(
     end: float,
     intervals: SpeechIntervals,
     *,
-    silence_min: float = 0.8,
+    silence_min: float = 0.45,
     pad: float = 0.12,
 ) -> list[tuple[float, float]]:
     """
@@ -75,12 +75,10 @@ def jump_cut_segments(
     for iv in inside:
         gap = iv.start - cursor
         if gap >= silence_min:
-            # drop silence; start keep from speech with small pad
             seg_start = max(start, iv.start - pad)
         else:
             seg_start = cursor if not keep else max(keep[-1][1], iv.start - pad)
             if keep and seg_start <= keep[-1][1]:
-                # extend previous
                 keep[-1] = (keep[-1][0], max(keep[-1][1], min(end, iv.end + pad)))
                 cursor = keep[-1][1]
                 continue
@@ -90,7 +88,6 @@ def jump_cut_segments(
             cursor = seg_end
     if not keep:
         return [(start, end)]
-    # merge tiny overlaps
     merged: list[list[float]] = [[keep[0][0], keep[0][1]]]
     for s, e in keep[1:]:
         if s <= merged[-1][1] + 0.05:
@@ -98,3 +95,40 @@ def jump_cut_segments(
         else:
             merged.append([s, e])
     return [(a, b) for a, b in merged]
+
+
+def force_asr_gap_cuts(
+    start: float,
+    end: float,
+    intervals: SpeechIntervals,
+    *,
+    silence_min: float = 0.25,
+    pad: float = 0.1,
+) -> list[tuple[float, float]]:
+    """Aggressively cut on voice gaps when a single keep-segment is too sparse."""
+    return jump_cut_segments(
+        start, end, intervals, silence_min=silence_min, pad=pad
+    )
+
+
+def choose_jump_cuts(
+    start: float,
+    end: float,
+    intervals: SpeechIntervals,
+    *,
+    silence_min: float = 0.45,
+    coverage_force: float = 0.85,
+) -> list[tuple[float, float]]:
+    """
+    Primary jump-cut on voice gaps; if only one cut and ASR/voice coverage
+    is below coverage_force, re-cut with a lower silence threshold.
+    """
+    cuts = jump_cut_segments(start, end, intervals, silence_min=silence_min)
+    if not cuts:
+        return [(start, end)]
+    ratio = speech_ratio(intervals, start, end)
+    if len(cuts) == 1 and ratio < coverage_force:
+        forced = force_asr_gap_cuts(start, end, intervals, silence_min=0.25)
+        if len(forced) > 1:
+            return forced
+    return cuts

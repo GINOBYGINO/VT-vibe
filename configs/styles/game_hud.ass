@@ -1,14 +1,14 @@
 [Script Info]
 Title: Game HUD
 ScriptType: v4.00+
-WrapStyle: 0
+WrapStyle: 2
 ScaledBorderAndShadow: yes
 PlayResX: 1080
 PlayResY: 1920
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Consolas,60,&H0000FF00,&H000000FF,&H00000000,&HAA000000,-1,0,0,0,100,100,0,0,3,2,0,8,40,40,200,1
+Style: Default,Consolas,48,&H0000FF00,&H000000FF,&H00000000,&HAA000000,-1,0,0,0,100,100,0,0,3,2,0,8,72,72,220,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

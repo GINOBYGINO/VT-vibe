@@ -267,6 +267,190 @@ def pick_best_non_overlapping(
     return selected
 
 
+@dataclass(frozen=True)
+class StoryArc:
+    start: float
+    end: float
+    score: float
+    title: str
+    reason: str
+    speech_ratio: float
+    hour_bucket: int
+    chapter_id: int | None
+    merged_from: tuple[int, ...]
+    continuity: float
+
+
+def _text_overlap_score(a: str, b: str) -> float:
+    a_set = {a[i : i + 2] for i in range(max(0, len(a) - 1))}
+    b_set = {b[i : i + 2] for i in range(max(0, len(b) - 1))}
+    if not a_set or not b_set:
+        return 0.0
+    return len(a_set & b_set) / max(1, len(a_set | b_set))
+
+
+def continuity_score(
+    seed: dict,
+    other: dict,
+    *,
+    chapter_for_t,
+    gap_max: float,
+) -> float:
+    """Higher = more mergeable (same/adjacent chapter, close in time, text overlap)."""
+    gap = max(0.0, other["start"] - seed["end"], seed["start"] - other["end"])
+    if gap > gap_max and not overlaps(
+        seed["start"], seed["end"], other["start"], other["end"]
+    ):
+        return 0.0
+    ch_a = chapter_for_t(seed["start"])
+    ch_b = chapter_for_t(other["start"])
+    chapter_bonus = 0.0
+    if ch_a is not None and ch_b is not None:
+        if ch_a == ch_b:
+            chapter_bonus = 1.0
+        elif abs(ch_a - ch_b) == 1:
+            chapter_bonus = 0.7
+        else:
+            return 0.0
+    text_score = _text_overlap_score(str(seed.get("title", "")), str(other.get("title", "")))
+    kw = min(1.0, (seed.get("keyword_hits", 0) + other.get("keyword_hits", 0)) / 4.0)
+    proximity = max(0.0, 1.0 - gap / max(gap_max, 1e-6))
+    return chapter_bonus * 0.5 + text_score * 0.3 + kw * 0.1 + proximity * 0.1
+
+
+def merge_story_arc(
+    seed: dict,
+    pool: Sequence[dict],
+    *,
+    chapter_for_t,
+    story_min: float,
+    story_max: float,
+    gap_max: float,
+    continuity_min: float = 0.35,
+) -> StoryArc:
+    """Expand a seed candidate forward/backward into a 45–120s story arc."""
+    members = [seed]
+    start = float(seed["start"])
+    end = float(seed["end"])
+    used = {int(seed["candidate_id"])}
+
+    changed = True
+    while changed:
+        changed = False
+        for other in sorted(pool, key=lambda c: -float(c.get("score", 0.0))):
+            oid = int(other["candidate_id"])
+            if oid in used:
+                continue
+            cont = continuity_score(
+                {"start": start, "end": end, **{k: seed.get(k) for k in ("title", "keyword_hits")}},
+                other,
+                chapter_for_t=chapter_for_t,
+                gap_max=gap_max,
+            )
+            # Also score against nearest member for title continuity
+            cont = max(
+                cont,
+                max(
+                    (
+                        continuity_score(
+                            m, other, chapter_for_t=chapter_for_t, gap_max=gap_max
+                        )
+                        for m in members
+                    ),
+                    default=0.0,
+                ),
+            )
+            if cont < continuity_min:
+                continue
+            new_start = min(start, float(other["start"]))
+            new_end = max(end, float(other["end"]))
+            if new_end - new_start > story_max + 1e-6:
+                continue
+            # Prefer growth that stays near gap_max between non-overlapping spans
+            gap = max(0.0, float(other["start"]) - end, start - float(other["end"]))
+            if gap > gap_max and not overlaps(start, end, other["start"], other["end"]):
+                continue
+            start, end = new_start, new_end
+            members.append(other)
+            used.add(oid)
+            changed = True
+
+    if end - start < story_min:
+        mid = (start + end) / 2.0
+        start = max(0.0, mid - story_min / 2.0)
+        end = start + story_min
+    if end - start > story_max:
+        end = start + story_max
+
+    speech_r = max(float(m.get("speech_ratio", 0.0)) for m in members)
+    score = max(float(m.get("score", 0.0)) for m in members)
+    title = str(seed.get("title") or "精華片段")
+    reason = f"故事弧合併 {len(members)} 段；" + str(seed.get("reason", ""))
+    return StoryArc(
+        start=start,
+        end=end,
+        score=score,
+        title=title,
+        reason=reason,
+        speech_ratio=speech_r,
+        hour_bucket=int(start // 3600),
+        chapter_id=chapter_for_t(start),
+        merged_from=tuple(sorted(int(m["candidate_id"]) for m in members)),
+        continuity=1.0 if len(members) > 1 else 0.0,
+    )
+
+
+def select_story_arcs_per_hour(
+    queue: Sequence[dict],
+    *,
+    n_buckets: int,
+    chapter_for_t,
+    speech_min: float,
+    story_min: float,
+    story_max: float,
+    gap_max: float,
+) -> list[StoryArc]:
+    """Pick ≥1 story arc per hour from top seeds, merging continuous candidates."""
+    arcs: list[StoryArc] = []
+    for bucket in range(n_buckets):
+        bucket_items = [c for c in queue if int(c.get("hour_bucket", -1)) == bucket]
+        if not bucket_items:
+            continue
+        qualified = [c for c in bucket_items if float(c.get("speech_ratio", 0)) >= speech_min]
+        pool = qualified or sorted(
+            bucket_items, key=lambda c: -float(c.get("speech_ratio", 0))
+        )[:8]
+        seeds = sorted(pool, key=lambda c: -float(c.get("score", 0)))[:5]
+        bucket_arcs: list[StoryArc] = []
+        for seed in seeds:
+            arc = merge_story_arc(
+                seed,
+                pool,
+                chapter_for_t=chapter_for_t,
+                story_min=story_min,
+                story_max=story_max,
+                gap_max=gap_max,
+            )
+            if any(overlaps(arc.start, arc.end, a.start, a.end) for a in bucket_arcs):
+                continue
+            bucket_arcs.append(arc)
+            break  # one primary arc per hour
+        if not bucket_arcs and seeds:
+            bucket_arcs.append(
+                merge_story_arc(
+                    seeds[0],
+                    pool,
+                    chapter_for_t=chapter_for_t,
+                    story_min=story_min,
+                    story_max=story_max,
+                    gap_max=gap_max,
+                )
+            )
+        arcs.extend(bucket_arcs)
+    arcs.sort(key=lambda a: a.start)
+    return arcs
+
+
 # Keep old helper name used by tests
 def windows_for_bucket(
     bucket: int,

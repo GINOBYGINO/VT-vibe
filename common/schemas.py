@@ -89,6 +89,8 @@ class Highlight(BaseModel):
     speech_ratio: float = 0.0
     start_display: str | None = None
     end_display: str | None = None
+    arc_id: int | None = None
+    merged_from: list[int] = Field(default_factory=list)
 
 
 class HighlightsFile(BaseModel):
@@ -136,7 +138,7 @@ class StepState(BaseModel):
 class JobConfig(BaseModel):
     max_clips: int | None = None
     clip_min_sec: float = 45.0
-    clip_max_sec: float = 60.0
+    clip_max_sec: float = 120.0
     aspect: str = "9:16"
     language: str = "zh"
     whisper_model: str = "medium"
@@ -150,6 +152,8 @@ class JobConfig(BaseModel):
     letterbox_ratio: float = 0.72
     initial_prompt: str = ""
     roi: dict[str, float] = Field(default_factory=dict)
+    vad_mode: Literal["asr_primary", "energy", "merged"] = "asr_primary"
+    vad_use_hpss: bool = False
 
 
 class JobState(BaseModel):

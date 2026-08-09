@@ -1,4 +1,4 @@
-"""CLI: preview highlight candidates with score breakdown."""
+"""CLI: preview highlight candidates / story arcs with score breakdown."""
 
 from __future__ import annotations
 
@@ -47,6 +47,29 @@ def preview(job_dir: str | Path, *, limit: int = 20) -> None:
         f"speech_ratio_min={data.get('speech_ratio_min')} total={len(cands)} "
         f"(showing {min(limit, len(cands))})"
     )
+
+    if paths.highlights_json.is_file():
+        hl = json.loads(paths.highlights_json.read_text(encoding="utf-8"))
+        items = hl.get("highlights") if isinstance(hl, dict) else hl
+        arc_table = Table(title="Selected story arcs")
+        arc_table.add_column("arc", justify="right")
+        arc_table.add_column("t")
+        arc_table.add_column("len", justify="right")
+        arc_table.add_column("merged_from")
+        arc_table.add_column("title")
+        for h in items or []:
+            start = float(h.get("start", 0))
+            end = float(h.get("end", 0))
+            merged = h.get("merged_from") or []
+            arc_table.add_row(
+                str(h.get("arc_id") or h.get("id")),
+                f"{start:.0f}-{end:.0f}",
+                f"{end - start:.1f}s",
+                ",".join(str(x) for x in merged) or "-",
+                str(h.get("title", ""))[:28],
+            )
+        console.print(arc_table)
+
     console.print(
         "Write decisions to "
         f"{paths.review_decisions} then re-run: "

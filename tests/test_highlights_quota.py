@@ -1,4 +1,4 @@
-"""Hard acceptance: >=1 highlight per hour, each <= 60s."""
+"""Hard acceptance: >=1 highlight per hour, each <= 120s (story arc)."""
 
 from __future__ import annotations
 
@@ -108,5 +108,6 @@ def test_highlights_quota_2_5h(tmp_path: Path) -> None:
     buckets = {h.hour_bucket for h in result.highlights}
     assert buckets >= {0, 1, 2}
     for h in result.highlights:
-        assert h.end - h.start <= 60.0 + 1e-6
+        assert h.end - h.start <= 120.0 + 1e-6
         assert h.end > h.start
+        assert h.arc_id is not None

@@ -29,8 +29,8 @@ from modules.highlights.scoring import (
     hour_bucket_count,
     make_hook,
     peak_seed_times,
-    pick_best_non_overlapping,
     score_window,
+    select_story_arcs_per_hour,
     window_around_seed,
     windows_for_bucket,
 )
@@ -164,6 +164,8 @@ def apply_decisions(
                 speech_ratio=float((base or {}).get("speech_ratio", 0.0)),
                 start_display=seconds_to_timestamp(start),
                 end_display=seconds_to_timestamp(end),
+                arc_id=len(highlights) + 1,
+                merged_from=[d.candidate_id],
             )
         )
     return highlights
@@ -198,6 +200,9 @@ def run(job_dir: str | Path, *, weights_path: Path | None = None) -> HighlightsF
     weights = load_weights_for_type(content_type, weights_path)
     clip_min = float(weights.get("clip_min_sec", config.clip_min_sec))
     clip_max = float(weights.get("clip_max_sec", config.clip_max_sec))
+    story_min = float(weights.get("story_min_sec", 45.0))
+    story_max = float(weights.get("story_max_sec", 120.0))
+    story_gap = float(weights.get("story_gap_max_sec", 25.0))
     step = float(weights.get("window_step_sec", 5.0))
     speech_min = float(weights.get("speech_ratio_min", 0.45))
     w_chat = float(weights.get("w_chat", 1.0))
@@ -322,54 +327,35 @@ def run(job_dir: str | Path, *, weights_path: Path | None = None) -> HighlightsF
         decisions = read_model(paths.review_decisions, ReviewDecisionsFile)
         highlights = apply_decisions(queue, decisions)
     else:
-        selected: list[WindowScore] = []
-        for bucket in range(n_buckets):
-            bucket_scores: list[WindowScore] = []
-            for item in queue:
-                if int(item["hour_bucket"]) != bucket:
-                    continue
-                bucket_scores.append(
-                    WindowScore(
-                        start=item["start"],
-                        end=item["end"],
-                        score=item["score"],
-                        chat_density=item["chat_density"],
-                        mean_zscore=item["mean_zscore"],
-                        keyword_hits=item["keyword_hits"],
-                        emotion_score=item["emotion_score"],
-                        speech_ratio=item["speech_ratio"],
-                        hour_bucket=item["hour_bucket"],
-                        title=item["title"],
-                        reason=item["reason"],
-                        candidate_id=item["candidate_id"],
-                    )
-                )
-            qualified = [c for c in bucket_scores if c.speech_ratio >= speech_min]
-            pool = qualified or bucket_scores
-            # relax once if empty qualified
-            if not qualified and bucket_scores:
-                pool = sorted(bucket_scores, key=lambda c: -c.speech_ratio)[:5]
-            picked = pick_best_non_overlapping(pool, min_count=1)
-            if picked:
-                selected.append(picked[0])
-
-        selected.sort(key=lambda w: w.start)
-        for i, ws in enumerate(selected, start=1):
-            start, end = clamp_duration(ws.start, ws.end, clip_max)
+        arcs = select_story_arcs_per_hour(
+            queue,
+            n_buckets=n_buckets,
+            chapter_for_t=chapter_for_t,
+            speech_min=speech_min,
+            story_min=story_min,
+            story_max=story_max,
+            gap_max=story_gap,
+        )
+        for i, arc in enumerate(arcs, start=1):
+            start, end = clamp_duration(arc.start, arc.end, story_max)
+            if end - start < min(story_min, clip_min) and duration >= story_min:
+                end = min(duration, start + story_min)
             highlights.append(
                 Highlight(
                     id=i,
                     start=start,
                     end=end,
-                    title=ws.title,
-                    reason=ws.reason,
-                    suggested_hook=make_hook(ws.title),
-                    score=ws.score,
+                    title=arc.title,
+                    reason=arc.reason,
+                    suggested_hook=make_hook(arc.title),
+                    score=arc.score,
                     hour_bucket=int(start // 3600),
-                    chapter_id=chapter_for_t(start),
-                    speech_ratio=ws.speech_ratio,
+                    chapter_id=arc.chapter_id,
+                    speech_ratio=arc.speech_ratio,
                     start_display=seconds_to_timestamp(start),
                     end_display=seconds_to_timestamp(end),
+                    arc_id=i,
+                    merged_from=list(arc.merged_from),
                 )
             )
 

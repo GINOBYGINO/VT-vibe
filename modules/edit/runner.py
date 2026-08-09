@@ -20,7 +20,7 @@ from common.schemas import (
     Transcript,
     TranscriptSegment,
 )
-from modules.edit.speech_trim import jump_cut_segments, refine_bounds
+from modules.edit.speech_trim import choose_jump_cuts, refine_bounds
 
 OUT_W = 1080
 OUT_H = 1920
@@ -66,23 +66,31 @@ def remap_transcript_for_cuts(
     cuts: list[tuple[float, float]],
     origin_start: float,
 ) -> Transcript:
-    """Map absolute transcript into concatenated jump-cut timeline."""
+    """Map absolute transcript into concatenated jump-cut timeline; drop cut-out remnants."""
+    del origin_start  # absolute cuts already encode timeline
     out: list[TranscriptSegment] = []
     cursor = 0.0
     for a, b in cuts:
         for seg in transcript.segments:
             if seg.end <= a or seg.start >= b:
                 continue
+            # Require meaningful overlap inside the keep segment
+            overlap = min(seg.end, b) - max(seg.start, a)
+            if overlap < 0.05:
+                continue
             rel_s = max(seg.start, a) - a + cursor
             rel_e = min(seg.end, b) - a + cursor
             if rel_e <= rel_s:
+                continue
+            text = (seg.text or "").strip()
+            if not text:
                 continue
             out.append(
                 TranscriptSegment(
                     id=len(out),
                     start=rel_s,
                     end=rel_e,
-                    text=seg.text,
+                    text=text,
                 )
             )
         cursor += b - a
@@ -320,7 +328,7 @@ def run(job_dir: str | Path) -> list[Path]:
     config = JobStore(job_dir).load().config if paths.job_json.is_file() else None
     content_h_ratio = config.letterbox_ratio if config else 0.72
     enable_hook = config.enable_hook if config else True
-    max_sec = config.clip_max_sec if config else 60.0
+    max_sec = config.clip_max_sec if config else 120.0
 
     speech = SpeechIntervals(intervals=[])
     if paths.speech_intervals.is_file():
@@ -331,19 +339,24 @@ def run(job_dir: str | Path) -> list[Path]:
 
     outputs: list[Path] = []
     all_meta: list[dict] = []
+    cut_counts: list[int] = []
 
     for i, highlight in enumerate(highlights, start=1):
         n = highlight.id if highlight.id > 0 else i
+        # Allow story arcs up to highlight span (capped by config)
+        span = max(0.0, highlight.end - highlight.start)
+        bound_max = max(max_sec, span) if span > 0 else max_sec
         start, end = refine_bounds(
             highlight.start,
             highlight.end,
             speech,
             pad=0.3,
-            max_sec=max_sec,
+            max_sec=bound_max,
         )
-        cuts = jump_cut_segments(start, end, speech, silence_min=0.8, pad=0.12)
+        cuts = choose_jump_cuts(start, end, speech, silence_min=0.45)
         if not cuts:
             cuts = [(start, end)]
+        cut_counts.append(len(cuts))
 
         hook_text = highlight.suggested_hook or highlight.title or "精華"
         video_out = paths.short_nosub(n)
@@ -385,12 +398,23 @@ def run(job_dir: str | Path) -> list[Path]:
         hook_text="",
         jump_cuts=[c for m in all_meta for c in m["cuts"]],
     )
+    avg_cuts = (sum(cut_counts) / len(cut_counts)) if cut_counts else 0.0
     write_json(
         paths.crop_meta,
         {
             **crop.model_dump(),
             "clips": all_meta,
+            "cuts_stats": {
+                "clip_count": len(cut_counts),
+                "avg_cuts": round(avg_cuts, 3),
+                "multi_cut_clips": sum(1 for c in cut_counts if c >= 2),
+            },
         },
     )
-    logger.info("edit done: %d clip(s)", len(outputs))
+    logger.info(
+        "edit done: %d clip(s) avg_cuts=%.2f multi_cut=%d",
+        len(outputs),
+        avg_cuts,
+        sum(1 for c in cut_counts if c >= 2),
+    )
     return outputs

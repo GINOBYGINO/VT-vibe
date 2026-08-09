@@ -112,6 +112,10 @@ def download_video(
         "quiet": False,
         "no_warnings": False,
         "js_runtimes": {"node": {}},
+        # Prefer android/web clients when web formats return 403
+        "extractor_args": {
+            "youtube": {"player_client": ["android", "web"]},
+        },
     }
     cookie_file = cookies or _cookies_path()
     if cookie_file:
