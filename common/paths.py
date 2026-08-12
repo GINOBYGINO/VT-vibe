@@ -37,6 +37,18 @@ class JobPaths:
     def subtitle(self) -> Path:
         return self.root / "05_subtitle"
 
+    @property
+    def effects(self) -> Path:
+        return self.root / "06_effects"
+
+    @property
+    def flourish(self) -> Path:
+        return self.root / "07_flourish"
+
+    @property
+    def hook(self) -> Path:
+        return self.root / "08_hook"
+
     def ensure_layout(self) -> None:
         for path in (
             self.root,
@@ -46,6 +58,9 @@ class JobPaths:
             self.highlights,
             self.edit,
             self.subtitle,
+            self.effects,
+            self.flourish,
+            self.hook,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -137,5 +152,31 @@ class JobPaths:
     def short_ass(self, n: int) -> Path:
         return self.subtitle / f"short_{n}.ass"
 
+    def short_sub(self, n: int) -> Path:
+        """Readable subtitles burned (module 5 intermediate)."""
+        return self.subtitle / f"short_{n}_sub.mp4"
+
     def short_final(self, n: int) -> Path:
-        return self.subtitle / f"short_{n}_final.mp4"
+        """Legacy alias: module 5 wrote finals here; now module 8 owns finals."""
+        return self.hook / f"short_{n}_final.mp4"
+
+    def short_fx(self, n: int) -> Path:
+        return self.effects / f"short_{n}_fx.mp4"
+
+    def effects_json(self, n: int) -> Path:
+        return self.effects / f"short_{n}_effects.json"
+
+    def short_flourish_ass(self, n: int) -> Path:
+        return self.flourish / f"short_{n}_flourish.ass"
+
+    def short_styled(self, n: int) -> Path:
+        return self.flourish / f"short_{n}_styled.mp4"
+
+    def flourish_meta(self, n: int) -> Path:
+        return self.flourish / f"short_{n}_flourish_meta.json"
+
+    def hook_intro(self, n: int) -> Path:
+        return self.hook / f"short_{n}_intro.mp4"
+
+    def hook_meta(self, n: int) -> Path:
+        return self.hook / f"short_{n}_hook_meta.json"

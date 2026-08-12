@@ -1,0 +1,14 @@
+{
+  "content_h_ratio": 0.72,
+  "subtitle_y_ratio": 0.55,
+  "subtitle_bar_h": 280,
+  "out_w": 1080,
+  "out_h": 1920,
+  "note": "main bottom flush with subtitle top; height clamps to subtitle_bar_top",
+  "derived": {
+    "content_h": 1056,
+    "content_top": 0,
+    "subtitle_bar_top": 1056,
+    "flush": true
+  }
+}

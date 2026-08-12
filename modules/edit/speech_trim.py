@@ -24,11 +24,11 @@ def refine_bounds(
     intervals: SpeechIntervals,
     *,
     pad_lead: float = 0.08,
-    pad_trail: float = 0.15,
+    pad_trail: float = 0.35,
     pad: float | None = None,
     max_sec: float = 120.0,
 ) -> tuple[float, float]:
-    """Snap to nearby speech; asymmetric pads (tight lead, short trail)."""
+    """Snap to nearby speech; asymmetric pads (tight lead, longer trail)."""
     if pad is not None:
         pad_lead = pad
         pad_trail = pad
@@ -121,7 +121,7 @@ def trim_leading_trailing_silence(
     intervals: SpeechIntervals,
     *,
     lead_pad: float = 0.08,
-    trail_pad: float = 0.15,
+    trail_pad: float = 0.35,
 ) -> tuple[list[tuple[float, float]], float, float]:
     """
     Force-snip head/tail dead air regardless of silence_min.

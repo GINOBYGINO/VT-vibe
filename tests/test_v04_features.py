@@ -31,7 +31,7 @@ from modules.subtitle.runner import (
 )
 
 
-def test_subtitle_no_wrap_splits_events() -> None:
+def test_subtitle_wraps_up_to_two_lines() -> None:
     long = "這是一句非常非常非常長會需要拆成下一句的字幕內容啊"
     parts = split_text_to_lines(long, max_chars=15)
     assert len(parts) >= 2
@@ -45,9 +45,14 @@ def test_subtitle_no_wrap_splits_events() -> None:
     ass = build_ass_from_transcript(tr, speech=speech, letterbox_ratio=0.72)
     assert len(ass.events) >= 2
     for ev in ass.events:
-        assert r"\N" not in ev.text
+        # Extract the rendered subtitle payload after ASS tags.
+        payload = ev.text.split("}")[-1].strip()
+        assert payload.count(r"\N") <= 1  # max 2 lines
+        rendered_lines = payload.split(r"\N") if payload else []
+        for ln in rendered_lines:
+            assert len(ln) <= 8
     style = ass.styles["Default"]
-    assert int(style.borderstyle) == 3
+    assert int(style.borderstyle) == 1
     assert fontsize_for_text("短句哈哈") >= 60
 
 
@@ -65,15 +70,21 @@ def test_subtitle_no_event_in_speech_gap() -> None:
     out = clamp_subtitle_timings(segs, speech=speech, silence_gap=0.2)
     assert len(out) == 2
     assert all(not (s < 2.0 < e) for s, e, _ in out)
-    assert out[0][1] <= 1.05
+    # v0.14: allow short linger past speech end into silence
+    assert out[0][1] <= 1.0 + 0.45
 
 
-def test_letterbox_geometry_above_content() -> None:
+def test_letterbox_geometry_inside_content() -> None:
+    from common.layout import SUBTITLE_BAR_H, SUBTITLE_Y_RATIO, subtitle_bar_top
+
     _x1, y1, _x2, y2, margin_v = letterbox_subtitle_geometry(0.72)
-    content_top = (1920 - int(1920 * 0.72)) // 2
-    assert margin_v <= content_top
-    assert y1 < content_top
-    assert y2 > y1
+    assert margin_v == subtitle_bar_top()
+    assert y1 == margin_v
+    assert y2 - y1 == SUBTITLE_BAR_H
+    # Mid-lower of frame
+    assert 0.5 <= SUBTITLE_Y_RATIO <= 0.7
+    assert y1 >= int(1920 * 0.5)
+    assert y2 <= 1920
 
 
 def test_lead_silence_trimmed_even_if_short() -> None:
@@ -137,6 +148,8 @@ def test_enrich_and_decisions_use_suggested(tmp_path: Path) -> None:
         content_type="talk",
         outro_keywords=["晚安"],
         outro_penalty=0.15,
+        intro_keywords=["安安"],
+        intro_penalty=0.15,
     )
     assert "suggested_start" in item
     assert "transcript_excerpt" in item
@@ -200,14 +213,14 @@ def test_highlights_queue_has_suggested(tmp_path: Path) -> None:
             ],
         ),
     )
-    result = run(paths.root)
+    result = run(paths.root, auto_arcs=True)
     assert paths.review_queue.is_file()
     assert paths.cursor_review_prompt.is_file()
     import json
 
     queue = json.loads(paths.review_queue.read_text(encoding="utf-8"))
     cands = queue["candidates"]
-    assert len(cands) <= 12
+    assert len(cands) <= 20
     assert "suggested_start" in cands[0]
     assert "transcript_excerpt" in cands[0]
     # Outro candidate should not dominate auto highlights

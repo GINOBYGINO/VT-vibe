@@ -1,12 +1,30 @@
 clip_min_sec: 45.0
 clip_max_sec: 60.0
 story_min_sec: 45.0
-story_max_sec: 120.0
-story_gap_max_sec: 25.0
-prefilter_top_n: 12
-window_step_sec: 5.0
+story_max_sec: 85.0
+story_gap_max_sec: 20.0
+continuity_min: 0.5
+prefilter_top_n: 20
+clips_per_hour: 4
+window_step_sec: 15.0
+bucket_slide_cap: 16
+seed_dedupe_sec: 8.0
+short_window_sec: 45.0
+diversity_min_gap_sec: 90.0
 speech_ratio_min: 0.45
 outro_penalty: 0.15
+intro_penalty: 0.15
+chat_lag_sec: 8.0
+w_chat: 2.0
+w_vol: 0.8
+w_kw: 1.4
+w_emotion: 1.0
+w_chat_react: 1.6
+w_chat_kw: 1.2
+w_clip_cue: 2.5
+chat_weak_vol_scale: 0.55
+chat_weak_kw_scale: 1.35
+chat_weak_emotion_scale: 1.25
 outro_keywords:
   - 晚安
   - 拜拜
@@ -20,23 +38,35 @@ outro_keywords:
   - 下禮拜見
   - 結束直播
   - 今日到此
-w_chat: 1.4
-w_vol: 1.0
-w_kw: 1.8
-w_emotion: 1.2
+intro_keywords:
+  - 安安
+  - 大家好
+  - 歡迎
+  - 問好
+  - 初次見面
+  - 今天來聊
+  - 哈囉
+  - 哈喽
+# ASR / host-side keywords
 keywords:
+  - 笑死
+  - 太扯
+  - 完蛋
+  - 哭啊
+  - 欸欸
+  - 哩勒
+  - 幹嘛
+  - 蛤
+  - 爆笑
+# Audience chat keywords
+chat_keywords:
   - 草
   - www
   - 笑死
   - 777
   - 哈哈哈
   - 太扯
-  - 完蛋
-  - 哭啊
   - LOL
   - 爆笑
-  - 欸欸
-  - 安安
-  - 哩勒
-  - 幹嘛
-  - 蛤
+  - 精華
+  - 剪輯師

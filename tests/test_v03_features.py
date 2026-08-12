@@ -176,6 +176,7 @@ def test_story_arc_merge_clamped_to_120() -> None:
         story_min=45.0,
         story_max=120.0,
         gap_max=25.0,
+        clips_per_hour=1,
     )
     assert len(arcs) == 1
     assert arcs[0].end - arcs[0].start <= 120.0 + 1e-6

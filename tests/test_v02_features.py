@@ -107,7 +107,7 @@ def test_highlights_speech_filter(tmp_path: Path) -> None:
             ],
         ),
     )
-    result = run(paths.root)
+    result = run(paths.root, auto_arcs=True)
     assert len(result.highlights) >= 2
     for h in result.highlights:
         assert h.end - h.start <= 120.0 + 1e-6

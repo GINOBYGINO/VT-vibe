@@ -7,6 +7,10 @@ __pycache__/
 dist/
 build/
 .mypy_cache/
+.env
+.env.*
+!.env.example
+outputs/
 jobs/
 e2e_*.log
 e2e_v0*.log

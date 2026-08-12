@@ -25,6 +25,8 @@ def preview(job_dir: str | Path, *, limit: int = 20) -> None:
     table.add_column("t")
     table.add_column("sug")
     table.add_column("score", justify="right")
+    table.add_column("react", justify="right")
+    table.add_column("cue", justify="right")
     table.add_column("speech", justify="right")
     table.add_column("outro")
     table.add_column("excerpt")
@@ -37,6 +39,8 @@ def preview(job_dir: str | Path, *, limit: int = 20) -> None:
             f"{c.get('suggested_start', c.get('start', 0)):.0f}-"
             f"{c.get('suggested_end', c.get('end', 0)):.0f}",
             f"{c.get('score', 0):.2f}",
+            f"{c.get('chat_react', 0):.2f}",
+            f"{c.get('chat_cue', 0):.1f}",
             f"{c.get('speech_ratio', 0):.2f}",
             "Y" if c.get("is_outro") else "",
             excerpt,
@@ -45,6 +49,7 @@ def preview(job_dir: str | Path, *, limit: int = 20) -> None:
     console.print(table)
     console.print(
         f"speech_ratio_min={data.get('speech_ratio_min')} "
+        f"chat_weak={data.get('chat_weak')} "
         f"queue={len(cands)} all={data.get('all_candidates_count', len(cands))} "
         f"(showing {min(limit, len(cands))})"
     )
@@ -72,11 +77,15 @@ def preview(job_dir: str | Path, *, limit: int = 20) -> None:
                 str(h.get("title", ""))[:28],
             )
         console.print(arc_table)
+        if not items:
+            console.print("[yellow]尚未選片：請寫入 review_decisions.json[/yellow]")
 
     console.print(
-        "1) Open cursor_review_prompt.md\n"
+        "請寫入 decisions（keep/reject）後繼續：\n"
+        f"1) Open cursor_review_prompt.md\n"
         f"2) Write decisions to {paths.review_decisions}\n"
-        "3) Re-run: python pipeline.py --job-dir ... --from-step 3"
+        "3) Re-run: python pipeline.py --job-dir ... --from-step 3\n"
+        "   （跳過人工：加 --auto-arcs）"
     )
 
 

@@ -103,7 +103,7 @@ def test_highlights_quota_2_5h(tmp_path: Path) -> None:
     write_json(store.paths.chatlog, ChatLog(available=True, messages=messages))
     write_json(store.paths.speech_intervals, SpeechIntervals(intervals=speech_ivs))
 
-    result = run(job_dir)
+    result = run(job_dir, auto_arcs=True)
     assert len(result.highlights) >= 3
     buckets = {h.hour_bucket for h in result.highlights}
     assert buckets >= {0, 1, 2}

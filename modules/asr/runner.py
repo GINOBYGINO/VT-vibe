@@ -24,6 +24,7 @@ from common.schemas import (
     TranscriptSegment,
     VolumePeak,
     VolumePeaks,
+    WordTiming,
 )
 from common.timecode import seconds_to_timestamp
 
@@ -32,6 +33,9 @@ WINDOW_SEC = 1.0
 EMOTION_WINDOW_SEC = 0.25
 DEFAULT_MODEL = "medium"
 DEFAULT_PROMPT = "這是台灣 VTuber 直播，常見用語：欸欸、草、笑死、777、安安。"
+DEFAULT_WHISPERX_BATCH_SIZE = 16
+DEFAULT_WHISPERX_COMPUTE_TYPE_CUDA = "float16"
+DEFAULT_WHISPERX_COMPUTE_TYPE_CPU = "int8"
 
 TranscribeFn = Callable[..., Transcript]
 
@@ -61,16 +65,45 @@ def apply_dictionary_to_transcript(
     transcript: Transcript,
     dictionary: dict[str, str],
 ) -> Transcript:
+    """Apply dictionary to segment text; keep word timings (text may stay raw)."""
     segments = [
         TranscriptSegment(
             id=seg.id,
             start=seg.start,
             end=seg.end,
             text=apply_dictionary(seg.text, dictionary),
+            words=list(seg.words or []),
         )
         for seg in transcript.segments
     ]
     return Transcript(language=transcript.language, segments=segments)
+
+
+def _parse_word_timings(raw_words: object) -> list[WordTiming]:
+    """Defensively parse WhisperX / faster-whisper word payloads."""
+    if not raw_words:
+        return []
+    out: list[WordTiming] = []
+    if not isinstance(raw_words, (list, tuple)):
+        return out
+    for w in raw_words:
+        try:
+            if isinstance(w, dict):
+                text = str(w.get("word") or w.get("text") or "").strip()
+                start = float(w.get("start", 0.0))
+                end = float(w.get("end", start))
+            else:
+                text = str(getattr(w, "word", None) or getattr(w, "text", "") or "").strip()
+                start = float(getattr(w, "start", 0.0))
+                end = float(getattr(w, "end", start))
+            if not text:
+                continue
+            if end < start:
+                end = start
+            out.append(WordTiming(start=start, end=end, text=text))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return out
 
 
 def compute_volume_peaks(
@@ -166,6 +199,102 @@ def compute_speech_intervals(
     )
 
 
+def compute_speech_intervals_silero(
+    audio_path: str | Path,
+    *,
+    merge_gap_sec: float = 0.35,
+    min_len_sec: float = 0.25,
+    threshold: float = 0.5,
+) -> SpeechIntervals:
+    """
+    Silero VAD intervals. Raises on import / runtime failure so callers can fallback.
+
+    Note: silero's bundled .jit path breaks on non-ASCII Windows paths (errno 42),
+    so we copy the model to a temp ASCII location before loading.
+    """
+    import shutil
+    import tempfile
+
+    import torch
+    from silero_vad import get_speech_timestamps, read_audio
+    from silero_vad.utils_vad import init_jit_model
+    import silero_vad as _silero_pkg
+
+    model_src = Path(_silero_pkg.__file__).resolve().parent / "data" / "silero_vad.jit"
+    if not model_src.is_file():
+        raise FileNotFoundError(f"silero model missing: {model_src}")
+
+    tmp_dir = Path(tempfile.gettempdir()) / "silero_vad_ascii"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    model_dst = tmp_dir / "silero_vad.jit"
+    if not model_dst.is_file() or model_dst.stat().st_size != model_src.stat().st_size:
+        shutil.copy2(model_src, model_dst)
+
+    model = init_jit_model(str(model_dst), device=torch.device("cpu"))
+
+    # read_audio / torchaudio can also choke on non-ASCII Windows paths.
+    audio_path = Path(audio_path)
+    audio_load = audio_path
+    tmp_audio: Path | None = None
+    try:
+        audio_path.resolve().as_posix().encode("ascii")
+    except UnicodeEncodeError:
+        tmp_audio = tmp_dir / f"clip_{abs(hash(str(audio_path.resolve()))) % 10_000_000}.wav"
+        shutil.copy2(audio_path, tmp_audio)
+        audio_load = tmp_audio
+
+    try:
+        wav = read_audio(str(audio_load), sampling_rate=16000)
+        stamps = get_speech_timestamps(
+            wav,
+            model,
+            sampling_rate=16000,
+            threshold=threshold,
+            min_speech_duration_ms=int(min_len_sec * 1000),
+            min_silence_duration_ms=int(merge_gap_sec * 1000),
+            return_seconds=True,
+        )
+    finally:
+        if tmp_audio is not None:
+            try:
+                tmp_audio.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    pairs: list[tuple[float, float]] = []
+    for st in stamps or []:
+        if isinstance(st, dict):
+            s = float(st.get("start", 0.0))
+            e = float(st.get("end", s))
+        else:
+            s = float(st[0])
+            e = float(st[1])
+        if e - s >= min_len_sec:
+            pairs.append((s, e))
+    merged = _merge_pairs(pairs, merge_gap_sec=merge_gap_sec)
+    return SpeechIntervals(
+        intervals=[SpeechInterval(start=a, end=b) for a, b in merged]
+    )
+
+
+def compute_energy_or_silero(
+    audio_path: str | Path,
+    *,
+    backend: str = "silero",
+    use_hpss: bool = False,
+) -> tuple[SpeechIntervals, str]:
+    """Try silero first when requested; fall back to energy VAD."""
+    mode = (backend or "silero").strip().lower()
+    if mode == "silero":
+        try:
+            speech = compute_speech_intervals_silero(audio_path)
+            if speech.intervals:
+                return speech, "silero"
+        except Exception:
+            pass
+    return compute_speech_intervals(audio_path, use_hpss=use_hpss), "energy"
+
+
 def speech_intervals_from_transcript(
     transcript: Transcript,
     *,
@@ -257,22 +386,26 @@ def build_speech_intervals(
     *,
     vad_mode: str = "asr_primary",
     use_hpss: bool = False,
+    vad_backend: str = "silero",
 ) -> tuple[SpeechIntervals, dict]:
     """
     Build voice intervals. Default asr_primary: ASR segments lead;
-    energy VAD only reinforces endpoints after IoU>0.2 filter (anti-BGM).
+    energy/silero VAD only reinforces endpoints after IoU>0.2 filter (anti-BGM).
     """
     asr = speech_intervals_from_transcript(transcript, merge_gap_sec=0.35)
     energy = SpeechIntervals(intervals=[])
+    energy_source = "none"
     if audio_path is not None and Path(audio_path).is_file():
-        energy = compute_speech_intervals(audio_path, use_hpss=use_hpss)
+        energy, energy_source = compute_energy_or_silero(
+            audio_path, backend=vad_backend, use_hpss=use_hpss
+        )
 
     mode = (vad_mode or "asr_primary").strip().lower()
     energy_kept = filter_energy_by_asr_iou(energy, asr, iou_min=0.2)
 
     if mode == "energy":
         speech = energy if energy.intervals else asr
-        source = "energy" if energy.intervals else "asr"
+        source = energy_source if energy.intervals else "asr"
     elif mode == "merged":
         speech = merge_speech_intervals(asr, energy_kept)
         source = "merged"
@@ -282,8 +415,10 @@ def build_speech_intervals(
 
     debug = {
         "vad_mode": mode,
+        "vad_backend": (vad_backend or "silero").strip().lower(),
         "use_hpss": use_hpss,
         "source": source,
+        "energy_source": energy_source,
         "asr_count": len(asr.intervals),
         "energy_count": len(energy.intervals),
         "energy_kept_count": len(energy_kept.intervals),
@@ -380,22 +515,144 @@ def _transcribe_with_whisper(
     kwargs: dict = {
         "language": language or None,
         "vad_filter": True,
+        "word_timestamps": True,
     }
     if initial_prompt:
         kwargs["initial_prompt"] = initial_prompt
     segments_iter, info = model.transcribe(str(audio_path), **kwargs)
     segments: list[TranscriptSegment] = []
     for i, seg in enumerate(segments_iter):
+        words = _parse_word_timings(getattr(seg, "words", None))
         segments.append(
             TranscriptSegment(
                 id=i,
                 start=float(seg.start),
                 end=float(seg.end),
                 text=(seg.text or "").strip(),
+                words=words,
             )
         )
     detected = getattr(info, "language", None) or language or "zh"
     return Transcript(language=str(detected), segments=segments)
+
+
+def _env_use_whisperx() -> bool:
+    return os.environ.get("USE_WHISPERX", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_use_whisperx_for_subtitle() -> bool:
+    """When set, WhisperX is reserved for subtitle burn-in (Module 5), not Module 2."""
+    return os.environ.get("USE_WHISPERX_FOR_SUBTITLE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def use_whisperx_for_module2() -> bool:
+    """Module 2 full-transcript: use WhisperX only if USE_WHISPERX=1 and not subtitle-only mode."""
+    if _env_use_whisperx_for_subtitle():
+        return False
+    return _env_use_whisperx()
+
+
+def _transcribe_with_whisperx(
+    audio_path: Path,
+    *,
+    model_size: str,
+    allow_cpu: bool,
+    language: str | None,
+    initial_prompt: str | None,
+) -> Transcript:
+    """
+    WhisperX transcription + alignment.
+
+    Note: whisperx is an optional dependency. Only invoked when USE_WHISPERX=1.
+    """
+    try:
+        import whisperx  # type: ignore
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "whisperx is not installed. Install it or unset USE_WHISPERX."
+        ) from exc
+
+    device = "cpu" if allow_cpu else "cuda"
+    compute_type = (
+        DEFAULT_WHISPERX_COMPUTE_TYPE_CPU
+        if allow_cpu
+        else DEFAULT_WHISPERX_COMPUTE_TYPE_CUDA
+    )
+
+    # Load ASR model
+    # language: hint for zh; whisperx may still auto-detect.
+    model = whisperx.load_model(
+        model_size,
+        device=device,
+        compute_type=compute_type,
+        language=language or None,
+    )
+
+    # transcribe
+    # whisperx API surface differs by version; try a couple of call patterns.
+    transcribe_kwargs: dict = {}
+    if initial_prompt:
+        # Some versions accept initial_prompt via asr_options / transcribe options.
+        # We attempt both via kwargs and fallback if rejected.
+        transcribe_kwargs["initial_prompt"] = initial_prompt
+
+    try:
+        result = model.transcribe(
+            str(audio_path),
+            batch_size=DEFAULT_WHISPERX_BATCH_SIZE,
+            # Disable WhisperX internal VAD so we don't lose "laugh/short burst" segments.
+            # Your pipeline already computes its own voice intervals (speech_intervals).
+            vad_filter=False,
+            **transcribe_kwargs,
+        )
+    except TypeError:
+        # Fallback: some versions don't accept vad_filter/initial_prompt kwargs.
+        result = model.transcribe(
+            str(audio_path),
+            batch_size=DEFAULT_WHISPERX_BATCH_SIZE,
+        )
+
+    # Align for better timestamps/segment boundaries.
+    detected_lang = result.get("language") or (language or "zh")
+    # whisperx expects language code like "zh" / "zh-cn" depending on its mapping
+    lang_code = str(detected_lang)
+
+    align_model, metadata = whisperx.load_align_model(
+        language_code=lang_code,
+        device=device,
+    )
+    aligned = whisperx.align(
+        result["segments"],
+        align_model,
+        metadata,
+        str(audio_path),
+        device=device,
+    )
+
+    aligned_segments = aligned.get("segments") or result.get("segments") or []
+    segments: list[TranscriptSegment] = []
+    for i, seg in enumerate(aligned_segments):
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", start))
+        text = (seg.get("text") or "").strip()
+        words = _parse_word_timings(seg.get("words"))
+        # Keep empty text segments; later filters decide whether to show.
+        segments.append(
+            TranscriptSegment(
+                id=i,
+                start=start,
+                end=end,
+                text=text,
+                words=words,
+            )
+        )
+
+    return Transcript(language=lang_code, segments=segments)
 
 
 _transcribe_mock: TranscribeFn | None = None
@@ -424,6 +681,8 @@ def run(
     dictionary = load_dictionary()
     vad_mode = "asr_primary"
     vad_use_hpss = False
+    vad_backend = "silero"
+    use_whisperx = use_whisperx_for_module2()
 
     if paths.job_json.is_file():
         store = JobStore(job_dir)
@@ -437,6 +696,7 @@ def run(
             initial_prompt = state.config.initial_prompt
         vad_mode = state.config.vad_mode or "asr_primary"
         vad_use_hpss = bool(state.config.vad_use_hpss)
+        vad_backend = getattr(state.config, "vad_backend", None) or "silero"
         store.mark_running(STEP_NAME)
 
     if paths.metadata.is_file():
@@ -464,18 +724,38 @@ def run(
                 transcript = Transcript.model_validate(transcript)
         else:
             logger.info(
-                "transcribing %s model=%s allow_cpu=%s",
+                "transcribing %s model=%s allow_cpu=%s engine=%s",
                 audio_path,
                 resolved_model,
                 resolved_allow_cpu,
+                "whisperx" if use_whisperx else "faster-whisper",
             )
-            transcript = _transcribe_with_whisper(
-                audio_path,
-                model_size=resolved_model,
-                allow_cpu=resolved_allow_cpu,
-                language=language,
-                initial_prompt=initial_prompt,
-            )
+            if use_whisperx:
+                logger.info(
+                    "transcribing with WhisperX model=%s allow_cpu=%s",
+                    resolved_model,
+                    resolved_allow_cpu,
+                )
+                transcript = _transcribe_with_whisperx(
+                    audio_path,
+                    model_size=resolved_model,
+                    allow_cpu=resolved_allow_cpu,
+                    language=language,
+                    initial_prompt=initial_prompt,
+                )
+            else:
+                if _env_use_whisperx_for_subtitle() and _env_use_whisperx():
+                    logger.info(
+                        "USE_WHISPERX_FOR_SUBTITLE=1 → Module2 uses faster-whisper "
+                        "(WhisperX deferred to subtitle burn-in)"
+                    )
+                transcript = _transcribe_with_whisper(
+                    audio_path,
+                    model_size=resolved_model,
+                    allow_cpu=resolved_allow_cpu,
+                    language=language,
+                    initial_prompt=initial_prompt,
+                )
 
         transcript = apply_dictionary_to_transcript(transcript, dictionary)
         write_json(paths.full_transcript_json, transcript)
@@ -492,6 +772,7 @@ def run(
             audio_path,
             vad_mode=vad_mode,
             use_hpss=vad_use_hpss,
+            vad_backend=vad_backend,
         )
         write_json(paths.speech_intervals, speech)
         write_json(paths.speech_intervals_debug, speech_debug)

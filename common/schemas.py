@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from common.layout import CONTENT_H_RATIO
+
 StreamType = Literal["talk", "game", "unknown"]
 ContentType = Literal["talk", "game", "auto"]
 
@@ -19,6 +21,8 @@ class Metadata(BaseModel):
     stream_type: StreamType = "unknown"
     chat_error: str | None = None
     channel_id: str | None = None
+    # yt-dlp upload_date as YYYYMMDD when available
+    upload_date: str | None = None
 
 
 class ChatMessage(BaseModel):
@@ -33,11 +37,20 @@ class ChatLog(BaseModel):
     error_reason: str | None = None
 
 
+class WordTiming(BaseModel):
+    """Per-word (or per-character) timing from ASR alignment."""
+
+    start: float
+    end: float
+    text: str
+
+
 class TranscriptSegment(BaseModel):
     id: int
     start: float
     end: float
     text: str
+    words: list[WordTiming] = Field(default_factory=list)
 
 
 class Transcript(BaseModel):
@@ -125,7 +138,9 @@ class CropMeta(BaseModel):
     layout: str = "letterbox_blur"
     content_h_ratio: float = 0.72
     roi: dict[str, float] = Field(default_factory=dict)
-    hook_text: str = ""
+    zoom_factor: float = 1.0
+    enable_zoom: bool = True
+    face_detected: bool = False
     jump_cuts: list[dict[str, float]] = Field(default_factory=list)
 
 
@@ -148,12 +163,21 @@ class JobConfig(BaseModel):
     layout_profile: str = "letterbox_blur"
     video_height: int | None = 720
     subtitle_style: str = "funny"
-    enable_hook: bool = True
-    letterbox_ratio: float = 0.72
+    letterbox_ratio: float = CONTENT_H_RATIO
     initial_prompt: str = ""
     roi: dict[str, float] = Field(default_factory=dict)
+    enable_zoom: bool = True
+    zoom_factor: float = 1.12
+    require_face_for_zoom: bool = True
     vad_mode: Literal["asr_primary", "energy", "merged"] = "asr_primary"
     vad_use_hpss: bool = False
+    vad_backend: Literal["energy", "silero"] = "silero"
+    subtitle_bar: bool = True
+    enable_effects: bool = True
+    enable_flourish: bool = True
+    enable_opening_hook: bool = True
+    test_alias: str | None = None
+    export_dir: str | None = None
 
 
 class JobState(BaseModel):

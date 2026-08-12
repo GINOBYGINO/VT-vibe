@@ -59,7 +59,12 @@ class JobStore:
 
     def load(self) -> JobState:
         data = json.loads(self.paths.job_json.read_text(encoding="utf-8"))
-        return JobState.model_validate(data)
+        state = JobState.model_validate(data)
+        # Backfill steps added in newer pipeline versions
+        for name in STEP_NAMES:
+            if name not in state.steps:
+                state.steps[name] = StepState()
+        return state
 
     def save(self, state: JobState) -> None:
         self.paths.job_json.write_text(

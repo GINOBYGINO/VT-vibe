@@ -38,9 +38,10 @@ def test_chatlog_schema_roundtrip(tmp_path: Path) -> None:
 
 
 def test_fetch_chatlog_failure_degrades() -> None:
-    with patch("modules.download.runner.ChatDownloader") as cls:
+    with patch("modules.download.chat.ChatDownloader") as cls:
         cls.return_value.get_chat.side_effect = RuntimeError("boom")
-        result = fetch_chatlog("https://www.youtube.com/watch?v=x", retries=1)
+        with patch("modules.download.chat._fetch_via_ytdlp", return_value=[]):
+            result = fetch_chatlog("https://www.youtube.com/watch?v=x", retries=1)
     assert result.available is False
     assert result.messages == []
     assert result.error_reason is not None
