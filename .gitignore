@@ -24,3 +24,7 @@ studio/review_session.json
 assets/fonts/*.ttf
 assets/fonts/*.otf
 assets/bgm/tracks/
+
+.wrangler/
+studio/web/.wrangler/
+

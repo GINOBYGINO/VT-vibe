@@ -145,7 +145,7 @@ npm run dev
 ### 手機／bestwox.com 操作頁（本機當資料庫）
 
 ```text
-手機瀏覽器 → https://bestwox.com（只有 UI）
+手機瀏覽器 → https://bestwox.com（只有 UI，Cloudflare Pages）
                 │  「連本機」貼上 Tunnel URL
                 ▼
 本機 PC：python -m studio（:8787）← cloudflared tunnel
@@ -165,8 +165,16 @@ npm run dev
 3. 手機開 `https://bestwox.com` → 右上「連本機」→ 貼上該 URL →「儲存並測試」。
 4. 之後 A/B/C 都打到你家電腦；關 Tunnel 或關 Studio 就連不上（刻意如此）。
 
-前端由 GitHub Actions 建置並佈到 **GitHub Pages**；自訂網域 `bestwox.com` 請在 repo **Settings → Pages** 綁定，DNS 加 Pages 指示的 CNAME／A 紀錄。  
-本機也可：`cd studio/web && npm run build`，再把 `dist/` 丟到任意靜態主機（勿設死 `VITE_API_BASE`，改用頁面內「連本機」）。
+前端佈署（Cloudflare Pages 專案 `bestwox`）：
+
+```powershell
+cd studio/web
+npm ci
+npm run build
+npx wrangler pages deploy dist --project-name bestwox --branch main
+```
+
+預覽網域：`https://bestwox.pages.dev`（自訂網域 `bestwox.com` 已綁在同一帳號）。
 
 ---
 
