@@ -1,7 +1,7 @@
-DEFAULT_TEST_URL = "https://www.youtube.com/watch?v=d6wJVaDzNBE"
+DEFAULT_TEST_URL = "https://www.youtube.com/watch?v=waG72NoHX9w"
 
 # Single source of truth for the current pipeline / export version.
-PIPELINE_VERSION = "0.15"
+PIPELINE_VERSION = "1.1"
 
 STEP_NAMES = (
     "01_download",
@@ -25,6 +25,7 @@ TEST_ALIASES = {
     "5": "test5",
     "6": "test6",
     "7": "test7",
+    "8": "test8",
 }
 
 REGRESSION_URLS = {
@@ -35,16 +36,18 @@ REGRESSION_URLS = {
     "5": "https://www.youtube.com/watch?v=eeUK3CTWjbU",  # test5 stable-subs
     "6": "https://www.youtube.com/watch?v=XqFwdmtj500",  # test6
     "7": "https://www.youtube.com/live/V2xvIm2lLGs",  # test7 official clip reference
+    "8": "https://www.youtube.com/live/IzhUFIvd5-o",  # test8
 }
 
 VIDEO_ID_TO_ALIAS = {
-    "d6wJVaDzNBE": "test1",
+    "waG72NoHX9w": "test1",
     "PjMOuWoBiAY": "test2",
     "KWcF-F0ozQ8": "test3",
     "C_Q3RlZLRXM": "test4",
     "eeUK3CTWjbU": "test5",
     "XqFwdmtj500": "test6",
     "V2xvIm2lLGs": "test7",
+    "IzhUFIvd5-o": "test8",
 }
 
 

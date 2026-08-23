@@ -15,11 +15,13 @@ from modules.hook.sfx import ensure_sfx, sfx_dir
 
 
 def test_pipeline_version_and_steps() -> None:
-    assert PIPELINE_VERSION == "0.15"
+    assert PIPELINE_VERSION == "1.1"
     assert "06_effects" in STEP_NAMES
     assert "07_flourish" in STEP_NAMES
     assert "08_hook" in STEP_NAMES
+    assert "09_studio9" not in STEP_NAMES
     assert STEP_NAMES.index("08_hook") == 7
+    assert len(STEP_NAMES) == 8
 
 
 def test_jobconfig_flags_default_on() -> None:
@@ -139,13 +141,131 @@ def test_colorize_readable_ass() -> None:
     colored, meta = colorize_readable_ass(
         base, keywords=["笑死"], peak_times=[]
     )
-    assert len(meta) == 1
+    assert any(m["reason"] == "keyword" and m["text"] == "笑死" for m in meta)
     text0 = colored.events[0].text
     assert r"\c&H0000FFFF&" in text0
-    # Only a fragment is yellow — reset present and not whole-line-only yellow
     assert r"{\r}" in text0
-    assert "哈哈" in text0  # uncolored tail remains
-    assert r"\c&H0000FFFF&" not in colored.events[1].text
+    assert "哈哈" in text0
+    # Second line has no keyword; jieba fallback may color a content word.
+
+
+def test_colorize_preserves_tags_and_breaks() -> None:
+    from modules.flourish.runner import colorize_readable_ass
+    import pysubs2
+    from pysubs2 import SSAEvent
+
+    base = pysubs2.SSAFile()
+    raw = r"{\clip(72,1056,1008,1336)\q2}{\fs128}前面笑死\N後面啦"
+    base.events.append(SSAEvent(start=0, end=1000, text=raw))
+    colored, meta = colorize_readable_ass(base, keywords=["笑死"])
+    assert meta
+    text0 = colored.events[0].text
+    assert r"\clip(" in text0
+    assert r"\fs128" in text0
+    assert r"\N" in text0
+    assert r"\c&H0000FFFF&" in text0
+    assert r"{\r}" in text0
+
+
+def test_colorize_jieba_fallback_without_keyword() -> None:
+    from modules.flourish.runner import colorize_readable_ass
+    import pysubs2
+    from pysubs2 import SSAEvent
+
+    base = pysubs2.SSAFile()
+    base.events.append(SSAEvent(start=0, end=1000, text=r"{\fs64}普通一句話"))
+    colored, meta = colorize_readable_ass(base, keywords=[])
+    assert meta
+    assert meta[0]["reason"] == "word"
+    assert r"\c&H0000FFFF&" in colored.events[0].text
+    assert r"\fs64" in colored.events[0].text
+
+
+def test_cps_fallback_stretches_crushed_segment() -> None:
+    from common.schemas import TranscriptSegment, WordTiming
+    from modules.subtitle.runner import (
+        clamp_subtitle_timings,
+        last_cps_repair_count,
+        repair_segments_for_timing,
+    )
+
+    # 96-ish chars packed into ~6s with word timings → cps >> 8
+    text = "什麼意思到底有什麼意思事情啊為什麼啊那麽星期一還要斷考但是讀不下去怎麼辦你現在開始放棄"
+    words = [
+        WordTiming(start=0.1 + i * 0.05, end=0.1 + i * 0.05 + 0.04, text=ch)
+        for i, ch in enumerate(text)
+    ]
+    segs = [
+        TranscriptSegment(id=0, start=0.07, end=6.0, text=text, words=words),
+        TranscriptSegment(id=1, start=33.0, end=40.0, text="後面才講這句", words=[]),
+    ]
+    repaired, n = repair_segments_for_timing(segs)
+    assert n >= 1
+    assert repaired[0].words == []
+    assert repaired[0].end > 6.0  # stretched into the gap before next seg
+    out = clamp_subtitle_timings(segs, speech=None)
+    assert last_cps_repair_count() >= 1
+    assert out
+    # Events should extend past the original 6s crush window
+    assert max(e for _s, e, _t in out) > 10.0
+
+
+def test_needs_edit_timing_fallback_high_cps_and_low_coverage() -> None:
+    from common.schemas import Transcript, TranscriptSegment, WordTiming
+    from modules.subtitle.runner import (
+        MAX_CHARS_PER_LINE,
+        needs_edit_timing_fallback,
+    )
+
+    text = "什麼意思到底有什麼意思事情啊為什麼啊那麽星期一還要斷考但是讀不下去怎麼辦你現在開始放棄"
+    words = [
+        WordTiming(start=0.1 + i * 0.05, end=0.1 + i * 0.05 + 0.04, text=ch)
+        for i, ch in enumerate(text)
+    ]
+    crushed = Transcript(
+        segments=[
+            TranscriptSegment(id=0, start=0.07, end=6.0, text=text, words=words),
+            TranscriptSegment(id=1, start=33.0, end=40.0, text="後面", words=[]),
+        ]
+    )
+    assert needs_edit_timing_fallback(crushed, clip_dur=40.0) is True
+
+    ok = Transcript(
+        segments=[
+            TranscriptSegment(id=0, start=0.0, end=5.0, text="正常說話", words=[]),
+            TranscriptSegment(id=1, start=10.0, end=20.0, text="中段也有", words=[]),
+            TranscriptSegment(id=2, start=25.0, end=35.0, text="後半繼續", words=[]),
+        ]
+    )
+    assert needs_edit_timing_fallback(ok, clip_dur=40.0) is False
+    assert MAX_CHARS_PER_LINE == 7
+
+
+def test_clamp_no_flash_stub() -> None:
+    from common.schemas import SpeechInterval, SpeechIntervals, TranscriptSegment
+    from modules.subtitle.runner import FLASH_MIN_SEC, clamp_subtitle_timings
+
+    segs = [
+        TranscriptSegment(id=0, start=0.0, end=2.0, text="開頭一句話"),
+        TranscriptSegment(id=1, start=2.1, end=4.0, text="緊接下一句"),
+    ]
+    # Tiny speech islands that would previously clamp to flash stubs
+    speech = SpeechIntervals(
+        intervals=[
+            SpeechInterval(start=0.0, end=0.12),
+            SpeechInterval(start=2.1, end=2.2),
+        ]
+    )
+    out = clamp_subtitle_timings(segs, speech=speech)
+    assert out
+    assert all((e - s) >= FLASH_MIN_SEC - 1e-6 for s, e, _ in out)
+
+
+def test_fontsize_no_short_boost() -> None:
+    from modules.subtitle.runner import fontsize_for_text
+
+    assert fontsize_for_text("短", base=128) == 128
+    assert fontsize_for_text("七個字整行", base=128) == 128
 
 
 def test_colorize_mid_keyword() -> None:

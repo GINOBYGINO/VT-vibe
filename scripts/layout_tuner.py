@@ -5,9 +5,7 @@ IMPORTANT: preview source must be the *original* landscape VOD
 Loading a final mp4 double-composites and looks like two frames fighting.
 
 Usage:
-  .\\.venv\\Scripts\\python.exe scripts\\layout_tuner.py
-  .\\.venv\\Scripts\\python.exe scripts\\layout_tuner.py `
-    --video jobs\\20260809_082034_KWcF-F0ozQ8\\01_download\\raw_video.mp4 --t 1040
+  .\\.venv\\Scripts\\python.exe scripts\\layout_tuner.py --video jobs\\<id>\\01_download\\raw_video.mp4 --t 1040
 """
 
 from __future__ import annotations
@@ -53,24 +51,12 @@ from common.layout import (  # noqa: E402
 
 LAYOUT_PY = ROOT / "common" / "layout.py"
 TUNE_JSON = ROOT / "configs" / "layout_tune.json"
-DEFAULT_RAW = (
-    ROOT / "jobs" / "20260809_082034_KWcF-F0ozQ8" / "01_download" / "raw_video.mp4"
-)
-
-
-def _find_ffmpeg() -> str:
-    winget = Path(
-        r"C:\Users\Gino\AppData\Local\Microsoft\WinGet\Packages"
-        r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
-        r"\ffmpeg-9.0-full_build\bin\ffmpeg.EXE"
-    )
-    if winget.is_file():
-        return str(winget)
-    return "ffmpeg"
 
 
 def extract_frame(video: Path, t_sec: float, out_png: Path) -> None:
-    ffmpeg = _find_ffmpeg()
+    from modules.subtitle.runner import find_ffmpeg
+
+    ffmpeg = find_ffmpeg()
     cmd = [
         ffmpeg,
         "-y",
@@ -296,7 +282,6 @@ class LayoutTunerApp:
         top.pack(fill=X, padx=8, pady=6)
         ttk.Entry(top, textvariable=self.video_path, width=70).pack(side=LEFT, padx=(0, 6))
         ttk.Button(top, text="選 raw…", command=self.pick_video).pack(side=LEFT, padx=2)
-        ttk.Button(top, text="用 test3 raw", command=self.use_test3_raw).pack(side=LEFT, padx=2)
         ttk.Button(top, text="重抓畫面", command=self.load_frame).pack(side=LEFT, padx=2)
         Label(top, text="t(s)").pack(side=LEFT, padx=(10, 2))
         ttk.Entry(top, textvariable=self.t_sec, width=8).pack(side=LEFT)
@@ -394,14 +379,6 @@ class LayoutTunerApp:
 
         var.trace_add("write", _sync)
         _sync()
-
-    def use_test3_raw(self) -> None:
-        if DEFAULT_RAW.is_file():
-            self.video_path.set(str(DEFAULT_RAW))
-            self.t_sec.set(1040.0)
-            self.load_frame()
-        else:
-            messagebox.showerror("找不到", str(DEFAULT_RAW))
 
     def pick_video(self) -> None:
         path = filedialog.askopenfilename(
@@ -547,10 +524,17 @@ class LayoutTunerApp:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="One-shot 9:16 3-layer layout tuner")
-    parser.add_argument("--video", type=Path, default=DEFAULT_RAW)
+    parser.add_argument(
+        "--video",
+        type=Path,
+        required=True,
+        help="Original landscape VOD (jobs/<id>/01_download/raw_video.mp4)",
+    )
     parser.add_argument("--t", type=float, default=1040.0, help="seek seconds on raw VOD")
     args = parser.parse_args()
-    video = args.video if args.video.is_file() else None
+    video = args.video.expanduser().resolve()
+    if not video.is_file():
+        raise SystemExit(f"--video not found: {video}")
     LayoutTunerApp(video, args.t).run()
 
 

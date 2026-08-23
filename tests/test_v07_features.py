@@ -27,7 +27,9 @@ def test_export_final_clip(tmp_path: Path, monkeypatch) -> None:
     )
     assert dest == out_dir / "test2_short_1_final.mp4"
     assert dest.is_file()
-    assert default_export_dir().name == "v0.13"
+    from common.constants import PIPELINE_VERSION
+
+    assert default_export_dir().name == f"v{PIPELINE_VERSION}"
 
 
 def test_normalize_chat_item_runs() -> None:

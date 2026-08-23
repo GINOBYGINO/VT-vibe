@@ -122,11 +122,13 @@ def test_no_words_falls_back_to_text_path() -> None:
 
 def test_split_prefers_jieba_over_hard_char_cut() -> None:
     # Without punctuation, jieba should avoid cutting inside common words when possible.
+    from modules.subtitle.runner import MAX_CHARS_PER_LINE
+
     text = "遊戲畫面看起來很奇怪耶"
-    parts = split_text_to_lines(text, max_chars=8)
+    parts = split_text_to_lines(text, max_chars=MAX_CHARS_PER_LINE)
     joined = "".join(parts)
     assert joined.replace(" ", "") == text.replace(" ", "")
-    assert all(len(p) <= 8 for p in parts)
+    assert all(len(p) <= MAX_CHARS_PER_LINE for p in parts)
 
 
 def test_ass_build_with_words() -> None:

@@ -42,6 +42,8 @@ def test_subtitle_wraps_up_to_two_lines() -> None:
         segments=[TranscriptSegment(id=0, start=0.0, end=4.0, text=long)]
     )
     speech = SpeechIntervals(intervals=[SpeechInterval(start=0.0, end=4.0)])
+    from modules.subtitle.runner import MAX_CHARS_PER_LINE
+
     ass = build_ass_from_transcript(tr, speech=speech, letterbox_ratio=0.72)
     assert len(ass.events) >= 2
     for ev in ass.events:
@@ -50,7 +52,7 @@ def test_subtitle_wraps_up_to_two_lines() -> None:
         assert payload.count(r"\N") <= 1  # max 2 lines
         rendered_lines = payload.split(r"\N") if payload else []
         for ln in rendered_lines:
-            assert len(ln) <= 8
+            assert len(ln) <= MAX_CHARS_PER_LINE
     style = ass.styles["Default"]
     assert int(style.borderstyle) == 1
     assert fontsize_for_text("短句哈哈") >= 60

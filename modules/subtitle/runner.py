@@ -29,7 +29,7 @@ _logger = setup_logger("modules.subtitle")
 MAX_SUB_SEC = 2.55
 GAP_PAD_SEC = 0.06
 SILENCE_GAP_SEC = 0.20
-MAX_CHARS_PER_LINE = 8
+MAX_CHARS_PER_LINE = 7
 # Each SSAEvent can render up to two lines using ASS line breaks (`\N`).
 MAX_LINES_PER_EVENT = 2
 MIN_SPEECH_OVERLAP = 0.08
@@ -41,12 +41,26 @@ MIN_SUB_SEC = 0.80
 LINGER_SEC = 0.40
 # Word-gap that forces a hard break when building events from words
 WORD_GAP_BREAK_SEC = 0.35
+# Drop word timings when chars/sec exceeds this (WhisperX crush-at-start)
+CPS_MAX = 8.0
+# If most word duration falls in the first this fraction of the segment, treat as crushed
+WORD_FRONT_LOAD_FRAC = 0.30
+# Clip ASR span coverage below this → prefer Module4 EDIT transcript
+EDIT_COVERAGE_MIN = 0.55
+# Absolute floor: never emit subtitle flashes shorter than this
+FLASH_MIN_SEC = 0.50
+# High-cps segment must also be at least this many chars to trigger edit fallback
+EDIT_FALLBACK_MIN_CHARS = 14
 BOX_LINE_H = SUBTITLE_BAR_H
 BOX_X1, BOX_X2 = 72, 1008
 
 _SPLIT_PUNCT = set("，,。.!！？?、；;：:… ")
 _HARD_PUNCT = set("。.!！？?")
 _NOISE_ONLY_RE = re.compile(r"^[\s\.\,\!\?？！。、；;：:\-~～…·・'\"「」『』（）()\[\]【】]+$")
+# Prefer not to start a new line with these particles alone
+_LINE_START_PARTICLES = frozenset("嗎呢啊啦吧呀唷呦喔哦欸誒蛤嗯")
+# Avoid cutting immediately before these conjunctions when near the limit
+_CONJUNCTIONS = frozenset({"但是", "然後", "所以", "因為", "可是", "而且", "不過", "如果"})
 
 
 def _is_noise_text(text: str) -> bool:
@@ -95,7 +109,12 @@ def find_ffmpeg() -> str:
 
 def escape_ass_filter_path(path: Path) -> str:
     text = path.resolve().as_posix()
-    return text.replace(":", r"\:")
+    return text.replace(":", r"\:").replace("'", r"\'")
+
+
+def subtitle_fonts_dir() -> Path:
+    """Project-local fonts for ASS burn-in (Taipei Sans TC Beta, etc.)."""
+    return Path(__file__).resolve().parents[2] / "assets" / "fonts"
 
 
 def resolve_style_path(style_name: str | None = None) -> Path:
@@ -136,24 +155,47 @@ def letterbox_subtitle_geometry(
 
 
 def fontsize_for_text(text: str, base: int = 60) -> int:
-    """Slightly larger fonts; long lines are split into new events, not shrunk hard."""
+    """Keep font at base (or slightly smaller for long lines).
+
+    Short-line boost removed: with 2x style fontsize (~128) and a hard
+    ``\\clip`` width of ~936px, ``base+12`` overflowed and clipped glyphs.
+    """
     # ASS line breaks are encoded as the literal sequence `\N`.
     cleaned = text.replace(" ", "").replace("\n", "").replace(r"\N", "")
     n = len(cleaned)
 
-    short_limit = MAX_CHARS_PER_LINE
     medium_limit = MAX_CHARS_PER_LINE * MAX_LINES_PER_EVENT
-
-    # Scale the old fixed caps (72/60/56) relative to `base`.
-    max_size = int(base * 1.125)  # 64 -> 72
     min_medium = int(base * 0.93)
     min_long = int(base * 0.88)
 
-    if n <= short_limit:
-        return min(max_size, base + 12)
     if n <= medium_limit:
         return max(min_medium, base)
     return max(min_long, base - 4)
+
+
+def _adjust_cut_for_semantics(rest: str, cut: int, max_chars: int) -> int:
+    """Keep particles with previous line; avoid cutting before conjunctions."""
+    if cut <= 0 or cut >= len(rest):
+        return cut
+    # If next line would start with a lone particle, pull it into this line when room.
+    if cut < len(rest) and rest[cut] in _LINE_START_PARTICLES and cut < max_chars:
+        cut = cut + 1
+    # If we cut immediately before a conjunction, prefer cutting after previous token.
+    for conj in sorted(_CONJUNCTIONS, key=len, reverse=True):
+        if rest[cut : cut + len(conj)] == conj and cut > max_chars // 3:
+            # Try jieba boundary before the conjunction.
+            before = rest[:cut]
+            tokens = _jieba_cut(before)
+            if tokens:
+                acc = 0
+                best = cut
+                for tok in tokens:
+                    nxt = acc + len(tok)
+                    if nxt <= cut and nxt > max_chars // 3:
+                        best = nxt
+                    acc = nxt
+                return best
+    return cut
 
 
 def split_text_to_lines(text: str, max_chars: int = MAX_CHARS_PER_LINE) -> list[str]:
@@ -184,11 +226,15 @@ def split_text_to_lines(text: str, max_chars: int = MAX_CHARS_PER_LINE) -> list[
             for tok in tokens:
                 nxt = acc + len(tok)
                 if nxt <= max_chars and nxt > max_chars // 3:
+                    # Don't end a line leaving only a particle for the next line
+                    # when we can keep one more short token.
                     best = nxt
                 if nxt >= max_chars:
                     break
                 acc = nxt
             cut = best if best > 0 else max_chars
+        cut = _adjust_cut_for_semantics(rest, cut, max_chars)
+        cut = min(max(1, cut), len(rest))
         chunk = rest[:cut].strip()
         if chunk:
             lines.append(chunk)
@@ -304,6 +350,197 @@ def _flatten_words(segments: list[TranscriptSegment]) -> list[WordTiming]:
             flat.append(WordTiming(start=a, end=a + step, text=ch))
     flat.sort(key=lambda w: w.start)
     return flat
+
+
+def _plain_char_count(text: str) -> int:
+    return len((text or "").replace(" ", "").replace("\n", "").replace(r"\N", ""))
+
+
+def _segment_cps(seg: TranscriptSegment) -> float:
+    n = _plain_char_count(seg.text or "")
+    span = max(0.05, float(seg.end) - float(seg.start))
+    return n / span
+
+
+def _words_front_loaded(seg: TranscriptSegment, frac: float = WORD_FRONT_LOAD_FRAC) -> bool:
+    words = [w for w in (seg.words or []) if (w.text or "").strip()]
+    if len(words) < 4:
+        return False
+    seg_start = float(seg.start)
+    seg_end = max(seg_start + 0.05, float(seg.end))
+    span = seg_end - seg_start
+    cutoff = seg_start + span * frac
+    # Duration of words whose midpoint falls before cutoff
+    front = 0.0
+    total = 0.0
+    for w in words:
+        a = float(w.start)
+        b = max(a, float(w.end))
+        dur = b - a
+        total += dur
+        mid = (a + b) * 0.5
+        if mid <= cutoff:
+            front += dur
+    if total <= 1e-6:
+        return False
+    return (front / total) >= 0.75
+
+
+def repair_segments_for_timing(
+    segments: list[TranscriptSegment],
+    *,
+    cps_max: float = CPS_MAX,
+    target_cps: float = 4.5,
+) -> tuple[list[TranscriptSegment], int]:
+    """
+    Drop crushed word timings and optionally stretch short high-cps spans.
+
+    Returns (repaired_segments, repair_count).
+    """
+    ordered = sorted(segments, key=lambda s: s.start)
+    repaired: list[TranscriptSegment] = []
+    count = 0
+    for i, seg in enumerate(ordered):
+        text = (seg.text or "").strip()
+        if not text:
+            repaired.append(seg)
+            continue
+        cps = _segment_cps(seg)
+        front = _words_front_loaded(seg) if seg.words else False
+        needs = cps > cps_max or front
+        if not needs:
+            repaired.append(seg)
+            continue
+
+        count += 1
+        start = max(0.0, float(seg.start))
+        end = max(start + 0.05, float(seg.end))
+        n = _plain_char_count(text)
+        # Stretch toward next segment so crushed / front-loaded text can breathe.
+        if n > 0:
+            ideal_end = start + (n / max(1.0, target_cps))
+            next_start = None
+            if i + 1 < len(ordered):
+                next_start = float(ordered[i + 1].start)
+            if next_start is not None:
+                ideal_end = min(ideal_end, next_start - GAP_PAD_SEC)
+            end = max(end, ideal_end)
+        _logger.info(
+            "timing_repair=cps_fallback id=%s cps=%.1f front=%s span=%.2f->%.2f text=%r",
+            seg.id,
+            cps,
+            front,
+            float(seg.end) - float(seg.start),
+            end - start,
+            text[:24],
+        )
+        repaired.append(
+            TranscriptSegment(
+                id=seg.id,
+                start=start,
+                end=end,
+                text=seg.text,
+                words=[],  # force sentence-level proportional path for this seg
+            )
+        )
+    return repaired, count
+
+
+def _segment_span_coverage(
+    segments: list[TranscriptSegment], clip_dur: float
+) -> float:
+    if clip_dur <= 0.05:
+        return 1.0
+    total = 0.0
+    for seg in segments:
+        total += max(0.0, float(seg.end) - float(seg.start))
+    return total / clip_dur
+
+
+def needs_edit_timing_fallback(
+    transcript: Transcript,
+    clip_dur: float,
+    *,
+    cps_max: float = CPS_MAX,
+    coverage_min: float = EDIT_COVERAGE_MIN,
+    min_chars: int = EDIT_FALLBACK_MIN_CHARS,
+) -> bool:
+    """True when clip ASR timing is crushed / sparse and EDIT should be preferred."""
+    segs = list(transcript.segments or [])
+    if not segs:
+        return True
+    if _segment_span_coverage(segs, clip_dur) < coverage_min:
+        return True
+    for seg in segs:
+        n = _plain_char_count(seg.text or "")
+        if n >= min_chars and _segment_cps(seg) > cps_max:
+            return True
+    return False
+
+
+def _clip_duration_from_cuts(crop_meta: dict | None, n: int) -> float | None:
+    if not crop_meta:
+        return None
+    cuts = _cuts_for_clip(crop_meta, n)
+    if not cuts:
+        return None
+    return sum(max(0.0, e - s) for s, e in cuts)
+
+
+def _probe_media_duration(path: Path, *, ffmpeg: str | None = None) -> float | None:
+    """Best-effort duration via ffprobe next to ffmpeg, else wave for .wav."""
+    if path.suffix.lower() == ".wav":
+        try:
+            import wave
+
+            with wave.open(str(path), "rb") as wf:
+                frames = wf.getnframes()
+                rate = wf.getframerate() or 1
+                return float(frames) / float(rate)
+        except Exception:
+            pass
+    ffmpeg_exe = ffmpeg or find_ffmpeg()
+    ffprobe = Path(ffmpeg_exe).with_name("ffprobe.exe")
+    if not ffprobe.is_file():
+        ffprobe = Path(ffmpeg_exe).with_name("ffprobe")
+    if not ffprobe.is_file():
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                str(ffprobe),
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path.resolve()),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return float(proc.stdout.strip())
+    except Exception:
+        return None
+    return None
+
+
+# Accumulator for review scripts (reset per clamp call)
+_LAST_CPS_REPAIR_COUNT = 0
+_LAST_EDIT_FALLBACK_COUNT = 0
+
+
+def last_cps_repair_count() -> int:
+    return _LAST_CPS_REPAIR_COUNT
+
+
+def last_edit_fallback_count() -> int:
+    return _LAST_EDIT_FALLBACK_COUNT
 
 
 def _has_usable_words(segments: list[TranscriptSegment]) -> bool:
@@ -590,10 +827,15 @@ def _finalize_event_timings(
             end = min(target, *caps) if caps else target
             end = max(end, start + 0.05)
 
-        if end <= start + 0.05:
-            if allow_drop:
-                continue
-            end = start + 0.05
+        # Anti-flash: never leave a stub shorter than FLASH_MIN_SEC.
+        # Prefer expanding (even past a tight next_asr); the next event will
+        # be pushed by the overlap pad below / on the following iteration.
+        if end - start < FLASH_MIN_SEC:
+            end = min(start + min_sec, start + max_sec)
+            if end - start < FLASH_MIN_SEC:
+                if allow_drop:
+                    continue
+                end = start + FLASH_MIN_SEC
 
         end = min(end, start + max_sec)
         if end <= start:
@@ -618,9 +860,14 @@ def clamp_subtitle_timings(
     Prefer word-level path when words are present; otherwise split by text and
     clamp against speech with soft fallback (no silent drops).
     """
-    if _has_usable_words(segments):
+    global _LAST_CPS_REPAIR_COUNT
+    repaired, repair_n = repair_segments_for_timing(segments)
+    _LAST_CPS_REPAIR_COUNT = repair_n
+
+    if _has_usable_words(repaired):
+        # Segments with cleared words get synthesized timings in _flatten_words.
         return build_events_from_words(
-            segments,
+            repaired,
             max_sec=max_sec,
             gap_pad=gap_pad,
             speech=speech,
@@ -628,7 +875,7 @@ def clamp_subtitle_timings(
             linger=linger,
         )
 
-    ordered = sorted(segments, key=lambda s: s.start)
+    ordered = sorted(repaired, key=lambda s: s.start)
     pieces: list[tuple[float, float, str]] = []
     for seg in ordered:
         text = (seg.text or "").strip()
@@ -753,7 +1000,15 @@ def burn_subtitles(
     ffmpeg_exe = ffmpeg or find_ffmpeg()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     escaped = escape_ass_filter_path(ass_path)
-    vf = f"ass='{escaped}'"
+    fonts = subtitle_fonts_dir()
+    has_fonts = fonts.is_dir() and (
+        any(fonts.glob("*.ttf")) or any(fonts.glob("*.otf"))
+    )
+    if has_fonts:
+        fonts_esc = escape_ass_filter_path(fonts)
+        vf = f"ass='{escaped}':fontsdir='{fonts_esc}'"
+    else:
+        vf = f"ass='{escaped}'"
     cmd = [
         ffmpeg_exe,
         "-y",
@@ -914,10 +1169,14 @@ def process_clip(
     if transcript is None:
         transcript_path = paths.short_transcript(n)
         if not transcript_path.is_file():
-            raise FileNotFoundError(
-                f"missing transcript for short_{n}: {transcript_path}"
+            _logger.warning(
+                "missing transcript for short_%s (%s); burn empty subs",
+                n,
+                transcript_path,
             )
-        transcript = read_model(transcript_path, Transcript)
+            transcript = Transcript(language="zh", segments=[])
+        else:
+            transcript = read_model(transcript_path, Transcript)
 
     resolved_ass = ass_path or paths.short_ass(n)
     resolved_final = final_path or paths.short_sub(n)
@@ -969,6 +1228,25 @@ def _subtitle_engines_for_alias(alias: str | None) -> list[str]:
 def run(job_dir: str | Path) -> list[Path]:
     paths = JobPaths(job_dir)
     paths.subtitle.mkdir(parents=True, exist_ok=True)
+    paths.logs.mkdir(parents=True, exist_ok=True)
+    # Attach per-job file handler (module logger may already have a stream handler).
+    log_path = paths.logs / "05_subtitle.log"
+    target = str(log_path.resolve())
+    has_file = False
+    for h in list(_logger.handlers):
+        if isinstance(h, logging.FileHandler):
+            try:
+                if Path(h.baseFilename).resolve() == Path(target):
+                    has_file = True
+                    break
+            except Exception:
+                pass
+    if not has_file:
+        fh = logging.FileHandler(log_path, encoding="utf-8")
+        fh.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
+        _logger.addHandler(fh)
 
     style_name = "funny"
     letterbox_ratio = 0.72
@@ -1017,6 +1295,8 @@ def run(job_dir: str | Path) -> list[Path]:
 
     engines = _subtitle_engines_for_alias(alias)
     ab_mode = len(engines) > 1
+    global _LAST_EDIT_FALLBACK_COUNT
+    _LAST_EDIT_FALLBACK_COUNT = 0
     _logger.info(
         "subtitle engines=%s alias=%s ab=%s whisperx_for_sub=%s",
         engines or ["legacy-short-transcript"],
@@ -1027,118 +1307,162 @@ def run(job_dir: str | Path) -> list[Path]:
 
     outputs: list[Path] = []
     tmp_dir = paths.subtitle / "_clip_asr_tmp"
-    if engines:
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        if engines:
+            tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    from common.export import resolve_export_root
+        from common.export import resolve_export_root
 
-    for n, nosub_path in clips:
-        _logger.info("processing short_%s style=%s", n, style_name)
+        for n, nosub_path in clips:
+            _logger.info("processing short_%s style=%s", n, style_name)
 
-        if not engines:
-            # Legacy: reuse Module4 sliced transcript.
-            final_path = process_clip(
-                n,
-                nosub_path,
-                paths,
-                style_path=style_path if style_path.is_file() else None,
-                ffmpeg=ffmpeg,
-                speech=speech,
-                crop_meta=crop_meta,
-                letterbox_ratio=letterbox_ratio,
-                final_path=paths.short_sub(n),
-            )
-            outputs.append(final_path)
-            continue
-
-        wav_path = tmp_dir / f"short_{n}.wav"
-        extract_clip_wav(nosub_path, wav_path, ffmpeg=ffmpeg)
-
-        for engine in engines:
-            tag = engine  # "fast" | "whisperx"
-            try:
-                clip_transcript = transcribe_clip(
-                    wav_path,
-                    engine=engine,
-                    model_size=whisper_model,
-                    allow_cpu=allow_cpu,
-                    language=language,
-                    initial_prompt=initial_prompt,
-                )
-            except Exception as exc:
-                _logger.warning(
-                    "clip ASR failed short_%s engine=%s: %s; skip variant",
-                    n,
-                    engine,
-                    exc,
-                )
+            if not engines:
+                try:
+                    transcript_path = paths.short_transcript(n)
+                    if not transcript_path.is_file():
+                        _logger.warning(
+                            "skip short_%s: missing transcript %s", n, transcript_path
+                        )
+                        continue
+                    final_path = process_clip(
+                        n,
+                        nosub_path,
+                        paths,
+                        style_path=style_path if style_path.is_file() else None,
+                        ffmpeg=ffmpeg,
+                        speech=speech,
+                        crop_meta=crop_meta,
+                        letterbox_ratio=letterbox_ratio,
+                        final_path=paths.short_sub(n),
+                    )
+                    outputs.append(final_path)
+                except Exception:
+                    _logger.exception("short_%s subtitle (legacy) failed", n)
                 continue
 
-            # Persist per-engine transcript for debugging / AB comparison.
-            tr_out = paths.subtitle / f"short_{n}_{tag}_transcript.json"
-            from common.io import write_json
+            wav_path = tmp_dir / f"short_{n}.wav"
+            extract_clip_wav(nosub_path, wav_path, ffmpeg=ffmpeg)
 
-            write_json(tr_out, clip_transcript)
+            for engine in engines:
+                tag = engine  # "fast" | "whisperx"
+                try:
+                    clip_transcript = transcribe_clip(
+                        wav_path,
+                        engine=engine,
+                        model_size=whisper_model,
+                        allow_cpu=allow_cpu,
+                        language=language,
+                        initial_prompt=initial_prompt,
+                    )
+                except Exception as exc:
+                    _logger.warning(
+                        "clip ASR failed short_%s engine=%s: %s; skip variant",
+                        n,
+                        engine,
+                        exc,
+                    )
+                    continue
 
-            if ab_mode:
-                ass_path = paths.subtitle / f"short_{n}_{tag}.ass"
-                final_path = paths.subtitle / f"short_{n}_{tag}_sub.mp4"
-            else:
-                ass_path = paths.short_ass(n)
-                final_path = paths.short_sub(n)
+                # Persist per-engine transcript for debugging / AB comparison.
+                tr_out = paths.subtitle / f"short_{n}_{tag}_transcript.json"
+                from common.io import write_json
 
-            # Per-clip VAD (silero with energy fallback) for soft timing guards.
-            clip_speech: SpeechIntervals | None = None
-            try:
-                from modules.asr.runner import compute_energy_or_silero
+                write_json(tr_out, clip_transcript)
 
-                clip_speech, src = compute_energy_or_silero(wav_path, backend="silero")
-                _logger.info(
-                    "short_%s clip VAD source=%s intervals=%d",
-                    n,
-                    src,
-                    len(clip_speech.intervals),
+                # Prefer Module4 EDIT timing when clip ASR is crushed / sparse.
+                clip_dur = (
+                    _clip_duration_from_cuts(crop_meta, n)
+                    or _probe_media_duration(wav_path, ffmpeg=ffmpeg)
+                    or _probe_media_duration(nosub_path, ffmpeg=ffmpeg)
+                    or max(
+                        (float(s.end) for s in clip_transcript.segments),
+                        default=1.0,
+                    )
                 )
-            except Exception as exc:
-                _logger.warning("short_%s clip VAD failed: %s", n, exc)
-                clip_speech = None
+                burn_transcript = clip_transcript
+                if needs_edit_timing_fallback(clip_transcript, float(clip_dur)):
+                    edit_path = paths.short_transcript(n)
+                    if edit_path.is_file():
+                        burn_transcript = read_model(edit_path, Transcript)
+                        _LAST_EDIT_FALLBACK_COUNT += 1
+                        _logger.info(
+                            "timing_repair=edit_fallback short_%s engine=%s "
+                            "clip_dur=%.2f coverage=%.2f",
+                            n,
+                            tag,
+                            float(clip_dur),
+                            _segment_span_coverage(
+                                list(clip_transcript.segments or []), float(clip_dur)
+                            ),
+                        )
+                    else:
+                        _logger.warning(
+                            "edit_fallback wanted for short_%s but missing %s; "
+                            "keep clip ASR + cps_fallback",
+                            n,
+                            edit_path.name,
+                        )
 
-            final_path = process_clip(
-                n,
-                nosub_path,
-                paths,
-                style_path=style_path if style_path.is_file() else None,
-                ffmpeg=ffmpeg,
-                speech=clip_speech,
-                crop_meta=crop_meta,
-                letterbox_ratio=letterbox_ratio,
-                transcript=clip_transcript,
-                ass_path=ass_path,
-                final_path=final_path,
-                engine_tag=tag,
-                speech_is_clip_relative=True,
-            )
-            outputs.append(final_path)
+                if ab_mode:
+                    ass_path = paths.subtitle / f"short_{n}_{tag}.ass"
+                    final_path = paths.subtitle / f"short_{n}_{tag}_sub.mp4"
+                else:
+                    ass_path = paths.short_ass(n)
+                    final_path = paths.short_sub(n)
 
-            if ab_mode:
-                # Intermediate AB export for subtitle comparison only.
-                base = resolve_export_root(alias=alias, export_dir=export_dir)
-                variant_dir = base / tag
-                exported = export_final_clip(
-                    final_path,
-                    alias=alias,
-                    job_id=job_id,
-                    n=n,
-                    export_dir=variant_dir,
-                )
-                _logger.info("AB subtitle export -> %s", exported)
+                # Per-clip VAD (silero with energy fallback) for soft timing guards.
+                clip_speech: SpeechIntervals | None = None
+                try:
+                    from modules.asr.runner import compute_energy_or_silero
 
-    # Cleanup temp wavs (best-effort)
-    if tmp_dir.is_dir():
-        try:
+                    clip_speech, src = compute_energy_or_silero(wav_path, backend="silero")
+                    _logger.info(
+                        "short_%s clip VAD source=%s intervals=%d",
+                        n,
+                        src,
+                        len(clip_speech.intervals),
+                    )
+                except Exception as exc:
+                    _logger.warning("short_%s clip VAD failed: %s", n, exc)
+                    clip_speech = None
+
+                try:
+                    final_path = process_clip(
+                        n,
+                        nosub_path,
+                        paths,
+                        style_path=style_path if style_path.is_file() else None,
+                        ffmpeg=ffmpeg,
+                        speech=clip_speech,
+                        crop_meta=crop_meta,
+                        letterbox_ratio=letterbox_ratio,
+                        transcript=burn_transcript,
+                        ass_path=ass_path,
+                        final_path=final_path,
+                        engine_tag=tag,
+                        speech_is_clip_relative=clip_speech is not None,
+                    )
+                    outputs.append(final_path)
+                except Exception:
+                    _logger.exception("short_%s subtitle engine=%s failed", n, tag)
+                    continue
+
+                if ab_mode:
+                    # Intermediate AB export for subtitle comparison only.
+                    base = resolve_export_root(alias=alias, export_dir=export_dir)
+                    variant_dir = base / tag
+                    exported = export_final_clip(
+                        final_path,
+                        alias=alias,
+                        job_id=job_id,
+                        n=n,
+                        export_dir=variant_dir,
+                    )
+                    _logger.info("AB subtitle export -> %s", exported)
+
+    finally:
+        if tmp_dir.is_dir():
             shutil.rmtree(tmp_dir, ignore_errors=True)
-        except Exception:
-            pass
 
     return outputs
 

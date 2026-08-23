@@ -112,7 +112,8 @@ def test_subtitle_silence_no_spoiler() -> None:
     )
     out = clamp_subtitle_timings(segs, speech=speech, silence_gap=0.25)
     assert len(out) == 2
-    assert out[0][1] <= 1.0 + 1e-6
+    # v0.14+: allow short linger past speech end into silence
+    assert out[0][1] <= 1.0 + 0.45
     assert out[1][0] >= 3.0 - 1e-6
     # Mid silence has no event covering it
     assert all(not (s < 2.0 < e) for s, e, _ in out)

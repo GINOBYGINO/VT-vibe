@@ -88,6 +88,55 @@ def pick_punch_window(
     return max(0.0, best_t - half), best_t + half
 
 
+def pick_punch_windows(
+    peaks: EmotionPeaks,
+    cuts: list[tuple[float, float]],
+    *,
+    n: int = 3,
+    span: float = 0.8,
+    min_gap: float = 0.35,
+) -> list[tuple[float, float]]:
+    """Pick up to n non-overlapping punch windows inside cuts, highest score first."""
+    ranked: list[tuple[float, float]] = []
+    for p in peaks.peaks:
+        if p.kind not in {"laugh", "scream", "burst"}:
+            continue
+        if any(a <= p.t <= b for a, b in cuts):
+            ranked.append((float(p.score), float(p.t)))
+    ranked.sort(key=lambda x: -x[0])
+
+    chosen: list[tuple[float, float]] = []
+    half = span / 2.0
+
+    def _fits(start: float, end: float) -> bool:
+        for a, b in chosen:
+            if end < a - min_gap or start > b + min_gap:
+                continue
+            return False
+        return True
+
+    for _score, t in ranked:
+        if len(chosen) >= n:
+            break
+        for a, b in cuts:
+            if not (a <= t <= b):
+                continue
+            start = max(a, t - half)
+            end = min(b, start + span)
+            start = max(a, end - span)
+            if end - start < 0.25:
+                break
+            if _fits(start, end):
+                chosen.append((start, end))
+            break
+
+    if not chosen:
+        one = pick_punch_window(peaks, cuts, span=span)
+        return [one]
+    chosen.sort(key=lambda x: x[0])
+    return chosen[:n]
+
+
 # Single centered hook card
 _HOOK_SLOTS = (("HookMid", 5, 0),)  # middle-center
 
@@ -106,7 +155,7 @@ def build_date_ass(date_text: str, *, total_sec: float | None = None) -> SSAFile
 
     for name, alignment, margin_v in _HOOK_SLOTS:
         style = pysubs2.SSAStyle()
-        style.fontname = "Microsoft JhengHei"
+        style.fontname = "Taipei Sans TC Beta"
         style.fontsize = HOOK_FONT_SIZE
         style.primarycolor = pysubs2.Color(255, 255, 255, 0)
         style.outlinecolor = pysubs2.Color(0, 0, 0, 0)

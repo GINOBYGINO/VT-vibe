@@ -11,8 +11,16 @@ build/
 .env.*
 !.env.example
 outputs/
-jobs/
+_clip_asr_tmp/
 e2e_*.log
 e2e_v0*.log
 e2e_*_stdout.log
 e2e_*_stderr.log
+node_modules/
+studio/web/dist/
+studio/serial.json
+studio/deleted.json
+studio/review_session.json
+assets/fonts/*.ttf
+assets/fonts/*.otf
+assets/bgm/tracks/

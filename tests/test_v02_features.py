@@ -50,7 +50,9 @@ def test_subtitle_anti_spoiler() -> None:
     assert len(out) >= 1
     # first must end before second starts
     assert out[0][1] <= out[1][0] + 1e-6 if len(out) > 1 else out[0][1] <= 4.5
-    assert fontsize_for_text("短") > fontsize_for_text("這是一句非常非常非常長的字幕內容喔喔喔")
+    # Long lines shrink slightly vs base; short lines no longer boost above base.
+    assert fontsize_for_text("短", base=64) == 64
+    assert fontsize_for_text("這是一句非常非常非常長的字幕內容喔喔喔", base=64) <= 64
 
 
 def test_highlights_speech_filter(tmp_path: Path) -> None:

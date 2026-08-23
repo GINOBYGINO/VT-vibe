@@ -57,3 +57,12 @@ def test_info_to_metadata() -> None:
     meta = info_to_metadata(info, "https://www.youtube.com/watch?v=d6wJVaDzNBE")
     assert meta.id == "d6wJVaDzNBE"
     assert meta.duration_sec == 7200.0
+
+
+def test_video_format_prefers_1080_60() -> None:
+    from modules.download.runner import video_format_selector
+
+    fmt = video_format_selector(1080)
+    assert "height<=?1080" in fmt
+    assert "fps>=50" in fmt
+    assert video_format_selector(None).startswith("bv*")

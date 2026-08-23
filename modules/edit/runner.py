@@ -39,6 +39,17 @@ from modules.edit.speech_trim import (
     trim_leading_trailing_silence,
 )
 
+def plan_edit_cuts(
+    start: float,
+    end: float,
+    speech: SpeechIntervals,
+    *,
+    silence_min: float = 0.45,
+) -> list[tuple[float, float]]:
+    """Jump-cut plan."""
+    cuts = choose_jump_cuts(start, end, speech, silence_min=silence_min)
+    return cuts if cuts else [(start, end)]
+
 
 def find_ffmpeg() -> str:
     path = shutil.which("ffmpeg")
@@ -354,7 +365,10 @@ def run(job_dir: str | Path) -> list[Path]:
     if not paths.full_transcript_json.is_file():
         raise FileNotFoundError(f"missing transcript: {paths.full_transcript_json}")
 
-    config = JobStore(job_dir).load().config if paths.job_json.is_file() else None
+    config = None
+    if paths.job_json.is_file():
+        state = JobStore(job_dir).load()
+        config = state.config
     # Layout SSOT: always use common/layout.py (ignore stale job.letterbox_ratio).
     content_h_ratio = CONTENT_H_RATIO
     effective_ratio = content_h_ratio_effective(content_h_ratio)
@@ -410,9 +424,7 @@ def run(job_dir: str | Path) -> list[Path]:
         )
         # Never expand ahead of highlight.start into non-speech
         start = max(start, highlight.start)
-        cuts = choose_jump_cuts(start, end, speech, silence_min=0.45)
-        if not cuts:
-            cuts = [(start, end)]
+        cuts = plan_edit_cuts(start, end, speech)
         cuts, lead_trim, trail_trim = trim_leading_trailing_silence(
             cuts, speech, lead_pad=0.08, trail_pad=0.35
         )

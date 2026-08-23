@@ -48,7 +48,15 @@ STEP_RUNNERS = {
 def _import_run(module_path: str):
     import importlib
 
-    mod = importlib.import_module(module_path)
+    try:
+        mod = importlib.import_module(module_path)
+    except ModuleNotFoundError as exc:
+        venv = project_root() / ".venv" / "Scripts" / "python.exe"
+        raise ModuleNotFoundError(
+            f"無法載入 {module_path}（{exc}）。"
+            f"請用專案虛擬環境執行，例如：{venv} -m studio"
+            f" 或 {venv} pipeline.py"
+        ) from exc
     return mod.run
 
 
@@ -147,7 +155,7 @@ def run_pipeline(
     test_alias: str | None = None,
 ) -> Path:
     # Ensure exported finals go into the versioned folder.
-    os.environ.setdefault("OUTPUT_VERSION", f"v{VERSION}")
+    os.environ["OUTPUT_VERSION"] = f"v{VERSION}"
     if job_dir is None:
         if not url:
             raise ValueError("url or job_dir is required")
@@ -284,7 +292,7 @@ def run_pipeline(
         version_tag = os.environ.get("OUTPUT_VERSION") or f"v{VERSION}"
         hist_path = project_root() / "outputs" / "version_history.jsonl"
         record = {
-            "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+            "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
             "version": version_tag,
             "pipeline_version": VERSION,
             "job_id": store.load().job_id if "store" in locals() else None,
@@ -308,8 +316,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--from-step",
         type=int,
         default=1,
-        choices=range(1, 6),
-        help="Resume from step 1-5",
+        choices=range(1, 9),
+        help="Resume from step 1-8",
     )
     parser.add_argument("--max-hours", type=float, default=None)
     parser.add_argument("--whisper-model", default=None)
@@ -333,13 +341,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--video-height",
         type=int,
         default=None,
-        help="Max download height (default 720); 0 = best",
+        help="Max download height (default 1080); 0 = best available",
     )
     parser.add_argument(
         "--regression",
-        choices=["1", "2", "3", "4", "5", "6", "7"],
+        choices=["1", "2", "3", "4", "5", "6", "7", "8"],
         default=None,
-        help="1=test1 2=test2 talk 3=test3 game 4=test4 emotion 5=test5 6=test6 7=test7",
+        help="1-8 regression URLs",
     )
     parser.add_argument(
         "--test-url",

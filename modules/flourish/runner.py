@@ -21,7 +21,7 @@ _FX_RE = re.compile(r"^short_(\d+)_fx\.mp4$", re.IGNORECASE)
 MAX_PER_SENTENCE = 2
 MAX_PER_10S = 3
 # ASS BGR: bright yellow
-FLOURISH_TAG = r"{\c&H0000FFFF&\3c&H000000&\bord5}"
+FLOURISH_TAG = r"{\c&H0000FFFF&\3c&H000000&\bord3}"
 FLOURISH_RESET = r"{\r}"
 HEAD_TAIL_MIN = 2
 KEY_SPAN_MAX = 6
@@ -125,7 +125,11 @@ def _load_keywords(stream_type: str) -> list[str]:
     if not path.is_file():
         path = configs_dir() / "weights_talk.yaml"
     data = load_yaml(path) if path.is_file() else {}
-    kws = [str(k) for k in (data.get("keywords") or [])]
+    # Prefer flourish_keywords; fall back to scoring keywords.
+    raw = data.get("flourish_keywords")
+    if not raw:
+        raw = data.get("keywords") or []
+    kws = [str(k) for k in raw]
     for extra in ("笑死", "爆笑"):
         if extra not in kws:
             kws.append(extra)
@@ -134,6 +138,60 @@ def _load_keywords(stream_type: str) -> list[str]:
 
 def _strip_ass_tags(text: str) -> str:
     return re.sub(r"\{[^}]*\}", "", text or "")
+
+
+_LEADING_TAG_RE = re.compile(r"^((?:\{[^}]*\})+)")
+
+
+def _split_ass_leading_tags(raw: str) -> tuple[str, str]:
+    """Split leading override tags from payload (payload may contain \\N)."""
+    text = raw or ""
+    m = _LEADING_TAG_RE.match(text)
+    if not m:
+        return "", text
+    return m.group(1), text[m.end() :]
+
+
+def _colorize_payload_keep_breaks(
+    payload: str,
+    *,
+    keywords: list[str],
+    reason: str,
+) -> tuple[str, str] | None:
+    """
+    Color one complete word inside payload while preserving \\N.
+    Returns (new_payload, frag) or None.
+    """
+    # Map plain (no \\N) indices → payload indices for insertion.
+    plain_chars: list[str] = []
+    plain_to_payload: list[int] = []
+    i = 0
+    while i < len(payload):
+        if payload.startswith(r"\N", i):
+            i += 2
+            continue
+        if payload[i] == "\n":
+            i += 1
+            continue
+        plain_chars.append(payload[i])
+        plain_to_payload.append(i)
+        i += 1
+    plain = "".join(plain_chars)
+    if not plain.strip():
+        return None
+    prefix, frag, suffix = _pick_key_span(plain, keywords=keywords, reason=reason)
+    if not frag:
+        return None
+    start = len(prefix)
+    end = start + len(frag)
+    if start < 0 or end > len(plain_to_payload):
+        return None
+    p0 = plain_to_payload[start]
+    p1 = plain_to_payload[end - 1] + 1
+    new_payload = (
+        payload[:p0] + FLOURISH_TAG + payload[p0:p1] + FLOURISH_RESET + payload[p1:]
+    )
+    return new_payload, frag
 
 
 def _token_spans(text: str) -> list[tuple[int, int, str]]:
@@ -290,6 +348,7 @@ def colorize_readable_ass(
 ) -> tuple[SSAFile, list[dict]]:
     """
     Recolor a complete content word inside matching subtitle events.
+    Preserves leading ASS tags and \\N line breaks.
     Returns (new ASS, meta events).
     """
     del peak_times
@@ -304,7 +363,8 @@ def colorize_readable_ass(
     for ev in base.events:
         start_sec = ev.start / 1000.0
         raw_body = ev.text or ""
-        plain = _strip_ass_tags(raw_body).replace(r"\N", "").strip()
+        leading, payload = _split_ass_leading_tags(raw_body)
+        plain = _strip_ass_tags(payload).replace(r"\N", "").strip()
         clone = SSAEvent(
             start=ev.start,
             end=ev.end,
@@ -317,39 +377,50 @@ def colorize_readable_ass(
         clone.marginv = ev.marginv
 
         ok, reason = _event_should_flourish(plain, start_sec, keywords=kws)
-        # Production path: only keyword hits (density); word fallback only if keyword path
-        if ok and reason == "keyword":
+        # Keyword preferred; jieba content-word fallback when no keyword hit.
+        if ok and reason in {"keyword", "word"}:
+            # Prefer keyword coloring when available
+            use_reason = reason
+            if reason == "word":
+                # Only fallback when no keyword appears in this line
+                if any(k and k in plain for k in kws):
+                    use_reason = "keyword"
             bucket = int(start_sec // 3.0)
             recent = [w for w in window_starts if start_sec - w < 10.0]
             if (
                 bucket_counts.get(bucket, 0) < max_per_sentence
                 and len(recent) < max_per_10s
             ):
-                prefix, frag, suffix = _pick_key_span(
-                    plain, keywords=kws, reason=reason
+                colored = _colorize_payload_keep_breaks(
+                    payload, keywords=kws, reason=use_reason
                 )
-                if frag and (
-                    _is_content_word(frag)
-                    or any(_is_content_word(t) for t in _jieba_cut(frag))
-                ):
-                    clone.text = _colorize_plain_fragment(prefix, frag, suffix)
-                    if prefix == "" and suffix:
-                        span_kind = "head"
-                    elif suffix == "" and prefix:
-                        span_kind = "tail"
-                    else:
-                        span_kind = "mid"
-                    meta.append(
-                        {
-                            "t": round(start_sec, 3),
-                            "end": round(ev.end / 1000.0, 3),
-                            "text": frag,
-                            "reason": reason,
-                            "span": span_kind,
-                        }
-                    )
-                    bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
-                    window_starts.append(start_sec)
+                if colored is not None:
+                    new_payload, frag = colored
+                    if frag and (
+                        _is_content_word(frag)
+                        or any(_is_content_word(t) for t in _jieba_cut(frag))
+                    ):
+                        clone.text = leading + new_payload
+                        pre, _, suf = _pick_key_span(
+                            plain, keywords=kws, reason=use_reason
+                        )
+                        if pre == "" and suf:
+                            span_kind = "head"
+                        elif suf == "" and pre:
+                            span_kind = "tail"
+                        else:
+                            span_kind = "mid"
+                        meta.append(
+                            {
+                                "t": round(start_sec, 3),
+                                "end": round(ev.end / 1000.0, 3),
+                                "text": frag,
+                                "reason": use_reason,
+                                "span": span_kind,
+                            }
+                        )
+                        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+                        window_starts.append(start_sec)
 
         out.events.append(clone)
     return out, meta

@@ -161,7 +161,7 @@ class JobConfig(BaseModel):
     allow_cpu: bool = False
     content_type: ContentType = "auto"
     layout_profile: str = "letterbox_blur"
-    video_height: int | None = 720
+    video_height: int | None = 1080
     subtitle_style: str = "funny"
     letterbox_ratio: float = CONTENT_H_RATIO
     initial_prompt: str = ""

@@ -87,7 +87,20 @@ class JobStore:
         step.status = "done"
         if artifacts:
             step.artifacts.update(artifacts)
-        if all(state.steps[name].status == "done" for name in STEP_NAMES):
+        if all(
+            state.steps[name].status in {"done", "skipped"} for name in STEP_NAMES
+        ):
+            state.status = "completed"
+        self.save(state)
+        return state
+
+    def mark_skipped(self, step_name: str) -> JobState:
+        state = self.load()
+        state.steps[step_name].status = "skipped"
+        state.steps[step_name].error = None
+        if all(
+            state.steps[name].status in {"done", "skipped"} for name in STEP_NAMES
+        ):
             state.status = "completed"
         self.save(state)
         return state

@@ -54,7 +54,7 @@ def test_v11_two_line_clip_taller_than_font() -> None:
         language="zh",
         segments=[
             TranscriptSegment(
-                id=0, start=0.0, end=2.0, text="等一下你們是怎麼知道的"
+                id=0, start=0.0, end=2.0, text="等一下你們到底是怎麼知道這件事情的啊"
             )
         ],
     )

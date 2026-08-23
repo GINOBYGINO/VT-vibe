@@ -107,19 +107,29 @@ def _cookies_path() -> str | None:
     return cookies_path()
 
 
+def video_format_selector(video_height: int | None) -> str:
+    """Prefer max height with 50+ fps when YouTube offers a 1080p60 stream."""
+    if not video_height:
+        return "bv*[fps>=50]+ba/bv*+ba/b"
+    h = int(video_height)
+    return (
+        f"bv*[height<=?{h}][fps>=50]+ba/"
+        f"bv*[height<=?{h}]+ba/"
+        f"b[height<=?{h}]/"
+        f"bv*+ba/b"
+    )
+
+
 def download_video(
     url: str,
     output_mp4: Path,
     *,
-    video_height: int | None = 720,
+    video_height: int | None = 1080,
     cookies: str | None = None,
 ) -> dict[str, Any]:
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
     outtmpl = str(output_mp4.parent / f"{output_mp4.stem}.%(ext)s")
-    if video_height:
-        fmt = f"bv*[height<=?{video_height}]+ba/b[height<=?{video_height}]/bv*+ba/b"
-    else:
-        fmt = "bv*+ba/b"
+    fmt = video_format_selector(video_height)
     def build_opts(*, use_cookies: bool) -> dict[str, Any]:
         opts: dict[str, Any] = {
             **base_ytdlp_opts(quiet=False, use_cookies=use_cookies),
@@ -248,6 +258,11 @@ def run(job_dir: str | Path, url: str | None = None) -> Metadata:
     store = JobStore(paths.root)
     state = store.load()
     video_height = state.config.video_height
+    if video_height is not None and video_height < 1080:
+        logger.info("raising download height %s -> 1080 (legacy cap was too low for Shorts)", video_height)
+        video_height = 1080
+        state.config.video_height = 1080
+        store.save(state)
 
     store.mark_running(STEP_NAME)
     try:

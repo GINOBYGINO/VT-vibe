@@ -7,12 +7,6 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-JOBS = {
-    "test2": ROOT / "jobs/20260809_084126_PjMOuWoBiAY/01_download/chatlog.json",
-    "test3": ROOT / "jobs/20260809_082034_KWcF-F0ozQ8/01_download/chatlog.json",
-    "test4": ROOT / "jobs/20260809_104548_C_Q3RlZLRXM/01_download/chatlog.json",
-    "test5": ROOT / "jobs/20260809_130813_eeUK3CTWjbU/01_download/chatlog.json",
-}
 
 PATTERNS = {
     "question_mark": re.compile(r"[?？]"),
@@ -29,8 +23,27 @@ PATTERNS = {
 }
 
 
+def _discover_chatlogs() -> list[tuple[str, Path]]:
+    jobs_root = ROOT / "jobs"
+    if not jobs_root.is_dir():
+        return []
+    found: list[tuple[str, Path]] = []
+    for job in sorted(jobs_root.iterdir()):
+        if not job.is_dir():
+            continue
+        path = job / "01_download" / "chatlog.json"
+        if path.is_file():
+            found.append((job.name, path))
+    return found
+
+
 def main() -> None:
-    for alias, path in JOBS.items():
+    rows = _discover_chatlogs()
+    if not rows:
+        print("No jobs/*/01_download/chatlog.json found. Run the pipeline first.")
+        return
+
+    for alias, path in rows:
         data = json.loads(path.read_text(encoding="utf-8"))
         msgs = data.get("messages") or []
         print("=" * 60)
@@ -68,11 +81,11 @@ def main() -> None:
         for t, tx in clip_rows[:20]:
             print(f"  CLIP t={t:>8}  {tx}")
         for name in ("multi_question", "question_mark", "laugh", "confusion"):
-            rows = samples.get(name) or []
-            if not rows:
+            rows_s = samples.get(name) or []
+            if not rows_s:
                 continue
             print(f"samples[{name}]")
-            for t, tx in rows[:6]:
+            for t, tx in rows_s[:6]:
                 print(f"  t={t:>8}  {tx}")
         print("top_short_tokens")
         for tok, c in grams.most_common(30):

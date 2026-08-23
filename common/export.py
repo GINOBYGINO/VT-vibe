@@ -74,17 +74,18 @@ def export_final_clip(
     job_id: str,
     n: int,
     export_dir: str | Path | None = None,
+    name_suffix: str = "final",
 ) -> Path:
     """
     Copy short final into unified outputs folder.
-    Name: {alias}_short_{n}_final.mp4 or {job_id}_short_{n}_final.mp4
+    Name: {alias}_short_{n}_{name_suffix}.mp4 (default suffix ``final``).
 
     For v0.10+ (when export_dir is None), files land under outputs/<ver>/<alias>/.
     """
     out_root = resolve_export_root(alias=alias, export_dir=export_dir)
     out_root.mkdir(parents=True, exist_ok=True)
     stem = (alias or job_id or "clip").strip() or "clip"
-    dest = out_root / f"{stem}_short_{n}_final.mp4"
+    dest = out_root / f"{stem}_short_{n}_{name_suffix}.mp4"
     shutil.copy2(src, dest)
     _logger.info("export -> %s", dest)
     return dest

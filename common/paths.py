@@ -49,6 +49,10 @@ class JobPaths:
     def hook(self) -> Path:
         return self.root / "08_hook"
 
+    @property
+    def studio9(self) -> Path:
+        return self.root / "09_studio9"
+
     def ensure_layout(self) -> None:
         for path in (
             self.root,
@@ -180,3 +184,18 @@ class JobPaths:
 
     def hook_meta(self, n: int) -> Path:
         return self.hook / f"short_{n}_hook_meta.json"
+
+    def short_s9_crop(self, n: int) -> Path:
+        return self.studio9 / f"short_{n}_crop.mp4"
+
+    def short_s9_ass(self, n: int) -> Path:
+        return self.studio9 / f"short_{n}_s9.ass"
+
+    def short_s9_sub(self, n: int) -> Path:
+        return self.studio9 / f"short_{n}_sub.mp4"
+
+    def short_s9(self, n: int) -> Path:
+        return self.studio9 / f"short_{n}_s9.mp4"
+
+    def studio9_meta(self, n: int) -> Path:
+        return self.studio9 / f"short_{n}_s9_meta.json"

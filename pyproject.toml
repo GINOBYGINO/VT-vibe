@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vtuber-clips"
-version = "0.1.0"
-description = "Automated VTuber highlight clipping MVP pipeline"
+version = "1.0.0"
+description = "Local YouTube VOD → 9:16 Shorts pipeline for VTuber highlights"
 requires-python = ">=3.11,<3.13"
 dependencies = [
   "yt-dlp>=2024.8.0",
@@ -21,10 +21,14 @@ dependencies = [
   "tqdm>=4.66.0",
   "nvidia-cublas-cu12>=12.0.0",
   "nvidia-cudnn-cu12>=9.0.0",
+  "opencv-python-headless>=4.8.0",
+  "jieba>=0.42.1",
+  "silero-vad>=5.0.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0.0"]
+whisperx = ["whisperx>=3.0.0"]
 
 [tool.setuptools.packages.find]
 include = ["common*", "modules*"]
